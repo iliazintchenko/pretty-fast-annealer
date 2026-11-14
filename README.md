@@ -35,6 +35,18 @@ spins = pfa.run(couplings, fields, beta_max=1.0, num_steps=100 * len(couplings),
 values = pfa.run(couplings, fields, sizes=sizes, num_steps=100 * len(sizes), num_reps=10)
 ```
 
+## Philosophy
+
+**Compute per solved problem.** Given unlimited compute, random guessing finds the optimum, and no algorithm is needed. The goal of a solver is to reduce the compute it takes to reach the lowest state of a given problem.
+
+**Tuning is compute.** The work spent tuning parameters for a problem is part of the work of solving it. A good solver needs little tuning.
+
+**Solve the problem as stated.** Mapping a problem to another form takes polynomial time, but if solving takes exponential time, a polynomial increase in size is an exponential increase in time. An optimal solver solves the problem in its native space.
+
+**A good solver has to sweat.** The more problem types a solver has been benchmarked on, the more kinds of local optima it has seen, and the better it is on each of them.
+
+**Solving is one stage.** Modeling, mapping into an energy, reducing the problem, solving, mapping back and deploying: in production pipelines, all of these stages matter.
+
 ## Algorithm
 
 Each step makes one move, chosen among all moves of all variables with probability
