@@ -245,10 +245,10 @@ low temperature (PFA at β, SA at 2β, see Equilibrium), PFA sits lower in energ
 
 ## Implementation
 
-The annealer runs in compiled C with SIMD, on one core, on any couplings and fields. It has five kernels, the compiled
-anneal loops: one for spins and one for variables with more values, each with the couplings either as an n × n array
-(the array kernels) or as lists of the nonzero ones (the sparse kernels, see Sparse couplings), and one for variables
-that exchange values (see Exchanges). Value 0 of every
+The annealer runs in compiled C with SIMD, on one core, on any couplings and fields. It has six kernels, the compiled
+anneal loops: one for spins, one for variables with more values and one for variables that exchange values (see
+Exchanges), each with the couplings either as an n × n array (the array kernels) or as lists of the nonzero ones (the
+sparse kernels, see Sparse couplings). Value 0 of every
 variable has no field and no couplings (any problem can be shifted to that form, see `sizes` under Usage), so each of
 the other values has a row of the couplings, n rows in all, and a move reads the row of the value it leaves and of
 the value it enters, none for value 0. On the array kernels those are full float64 rows, zeros included, and one pass
@@ -445,12 +445,35 @@ the spin kernel selects among spins.
   the clusters: a walk over the unused arcs from any value closes a cycle whenever it returns to a value it has
   visited, and can only end where it started.
 
+**Sparse couplings** (`sparse_swap.c`). When each variable is coupled to few others, an exchange changes F on the two
+variables and their neighbours only, and the kernel draws the pair from trees of sums without a pass over the pairs.
+The weight of a pair with A_rs = 0 factors into the weights of the two single moves, e^(−β ΔE(r→b)) e^(−β ΔE(s→a)),
+so the variables at value a form the class a→b with the sum Z(a→b) of their weights, and the uncoupled pairs of the
+block of values (a, b) weigh Z(a→b) Z(b→a) − S(a, b), S the same products summed over the coupled pairs of the block,
+kept as a running sum. A draw picks a block by that weight, then one variable from each class by its weight, again
+while the two are coupled, and after 16 such draws by enumerating the two classes. The coupled pairs at different
+values have their full weights in a second tree and are drawn from it with its share of the total. The classes are
+the subtrees of one tree: each class is padded to a power of 8 so that it is one entry at one level, its class sum,
+and a draw within it walks down from there. β rises between rebuilds as in the other sparse kernels, with the largest
+x of any pair from trees of maxima kept next to the sums. A step refreshes the leaves of the exchanged variables and
+their neighbours, (2d + 2)(q − 1) with one exponential each, the blocks of the values touched, and the coupled pairs
+of those variables, (2d + 2) d. `run()` takes the sparse kernel where that is cheaper than streaming the pairs:
+
+```
+(2d + 2) (120 (q − 1) + 18 d)  <  0.32 · pairs + 0.17 n q + 10 n        in nanoseconds
+```
+
+with the constants fitted to timings of both kernels on one machine (Apple M4). For few values on a sparse graph
+the sparse kernel is far faster: at degree 30 about twice, at degree 3 a hundred times. For a permutation every
+changed variable touches all q = n classes, so the array kernel keeps problems below about a thousand variables, and
+the sparse one takes the large sparse ones.
+
 ## Usage
 
-`make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the five kernels: `spin.c`
-and `categorical.c` for couplings as an array, `sparse_spin.c` and `sparse_categorical.c`, which draw from the
-tree of sums of `sums.c`, and `swap.c` for variables that exchange values; and `eliminate.c` and `fold.c`. The three
-array kernels use the one SIMD path that matches the machine; the rest is the same code on every path:
+`make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the six kernels: `spin.c`,
+`categorical.c` and `swap.c` for couplings as an array, and `sparse_spin.c`, `sparse_categorical.c` and
+`sparse_swap.c`, which draw from the tree of sums of `sums.c`; and `eliminate.c` and `fold.c`. The three array
+kernels use the one SIMD path that matches the machine; the rest is the same code on every path:
 
 | path | files | used on |
 |---|---|---|
@@ -468,7 +491,7 @@ each variable (int64). Its parameters:
 
 | parameter | what it is | default | notes |
 |---|---|---|---|
-| `couplings` | the couplings, an n × n symmetric matrix with zero diagonal: J for spins, with `sizes` between the values, with `counts` A between the variables; an array or a `scipy.sparse` matrix | required | The format does not change the result: `run()` picks the array or the sparse kernels from the number of nonzero couplings (see Sparse couplings). The array kernels read a C-contiguous float64 array in place; any other input is converted once, a `scipy.sparse` matrix to n × n float64. If that array would take more than half of the machine's memory, the kernel that needs less memory runs. |
+| `couplings` | the couplings, an n × n symmetric matrix with zero diagonal: J for spins, with `sizes` between the values, with `counts` A between the variables; an array or a `scipy.sparse` matrix | required | The format does not change the result: `run()` picks the array or the sparse kernels from the number of nonzero couplings (see Sparse couplings and Exchanges). The array kernels read a C-contiguous float64 array in place; any other input is converted once, a `scipy.sparse` matrix to n × n float64. If that array would take more than half of the machine's memory, the kernel that needs less memory runs. |
 | `fields` | the fields, a length-n vector: h for spins, or with `sizes` of the values; with `counts` n × q, the field of each variable at each value | `None` (zeros) | Enter only through F, so they cost nothing per step. |
 | `sizes` | the number of values of each variable | `None` (spins) | Variable r takes a value in 0 … `sizes[r]` − 1. Each value other than 0 has a row and column of `couplings` and an entry of `fields`, ordered by variable (variable 0's values 1 … `sizes[0]` − 1 first), so n = Σ (`sizes[r]` − 1). The energy is the fields of the values taken plus each coupling between two of them once: ½ xᵀ C x + fᵀ x with x_k = 1 for the values taken. Couplings between values of the same variable must be zero. Values that no optimum needs are removed first (see Elimination). |
 | `counts` | the number of variables at each of q values, summing to n | `None` | Variable r takes a value in 0 … q − 1, and `counts[v]` variables are at value v throughout (see Exchanges). The energy is Σ_r `fields[r, x_r]` + Σ_{r<s} `couplings[r, s]` · `table[x_r, x_s]`. k of n: `counts` (n − k, k) with `table` [[0, 0], [0, 1]]; parts of given sizes: `table` 1 − I to count the edges between parts; a permutation: `counts` all 1, `table` the distances. |

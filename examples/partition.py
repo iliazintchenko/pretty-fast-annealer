@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pfa
 
 rng = np.random.default_rng(0)
-V, degree = 400, 6
+V, degree = 1000, 6
 edges = rng.integers(0, V, (V * degree // 2, 2))
 edges = np.unique(np.sort(edges[edges[:, 0] != edges[:, 1]], axis=1), axis=0)
 adjacency = np.zeros((V, V))

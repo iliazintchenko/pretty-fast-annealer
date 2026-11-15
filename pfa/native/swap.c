@@ -43,8 +43,47 @@ typedef struct {
     float *pp;                 // tabu penalty by position (n + 64, zero beyond n)
 } Swap;
 
-// Per value c, a queue of the variables that moved to c, with the step: var, when at off[c] + i % (tau[c] + 1).
+// The tabu queues, shared with sparse_swap.c: per value c, the variables that moved to c, with the step, in a ring of
+// tau[c] + 1 entries at off[c] (at most one variable moves to a value per step). last[v]: the step of v's last move.
 typedef struct { const int64_t *tau; int64_t *off; int *var; long *when, *head, *tail, *last; } Tabu;
+
+static void tabu_new(Tabu *tb, int n, int q, const int64_t *tenure) {
+    tb->tau = tenure;
+    tb->off = malloc(sizeof(int64_t) * (q + 1));
+    tb->off[0] = 0;
+    for (int c = 0; c < q; c++) tb->off[c + 1] = tb->off[c] + tenure[c] + 1;
+    tb->var = malloc(sizeof(int) * tb->off[q]); tb->when = malloc(sizeof(long) * tb->off[q]);
+    tb->head = calloc(q, sizeof(long)); tb->tail = calloc(q, sizeof(long)); tb->last = malloc(sizeof(long) * n);
+    for (int v = 0; v < n; v++) tb->last[v] = -1;
+}
+
+static void tabu_free(Tabu *tb) {
+    free(tb->off); free(tb->var); free(tb->when); free(tb->head); free(tb->tail); free(tb->last);
+}
+
+// The variables whose tenure is over at this step and that have not moved since, into out; returns how many.
+static int tabu_expire(Tabu *tb, int q, long step, int *out) {
+    int cnt = 0;
+    for (int c = 0; c < q; c++) {
+        const long cap = tb->tau[c] + 1;
+        while (tb->head[c] < tb->tail[c]) {
+            const long i = tb->off[c] + tb->head[c] % cap;
+            if (tb->when[i] > step - tb->tau[c]) break;
+            tb->head[c]++;
+            if (tb->last[tb->var[i]] == tb->when[i]) out[cnt++] = tb->var[i];
+        }
+    }
+    return cnt;
+}
+
+// Variable v moved to value c at this step; returns whether it is tabu now (value c has a tenure).
+static int tabu_push(Tabu *tb, int v, int c, long step) {
+    tb->last[v] = step;
+    if (tb->tau[c] == 0) return 0;
+    const long j = tb->off[c] + tb->tail[c] % (tb->tau[c] + 1);
+    tb->var[j] = v; tb->when[j] = step; tb->tail[c]++;
+    return 1;
+}
 
 // One pass: applies the pending update to D, scores every pair and returns the first pair at the maximum as its
 // row *t_out and column *u_out.
@@ -136,32 +175,18 @@ static void swap_step(Swap *S, int t, int u) {
 
 // The tabu after the exchange: the variables whose tenure is over leave, and the two that moved enter at their new
 // values.
-static void swap_tabu(Swap *S, Tabu *tb, int t, int u, long step, double beta, double lambda) {
-    for (int c = 0; c < S->q; c++) {
-        const long cap = tb->tau[c] + 1;
-        while (tb->head[c] < tb->tail[c]) {
-            const long i = tb->off[c] + tb->head[c] % cap;
-            if (tb->when[i] > step - tb->tau[c]) break;
-            const int v = tb->var[i];
-            tb->head[c]++;
-            if (tb->last[v] == tb->when[i]) { S->pen[v] = 0.0; S->pp[S->at[v]] = 0.0f; }
-        }
-    }
+static void swap_tabu(Swap *S, Tabu *tb, int *out, int t, int u, long step, double beta, double lambda) {
+    const int cnt = tabu_expire(tb, S->q, step, out);
+    for (int i = 0; i < cnt; i++) { S->pen[out[i]] = 0.0; S->pp[S->at[out[i]]] = 0.0f; }
     const int moved[2] = {S->pos[u], S->pos[t]}, into[2] = {S->val[u], S->val[t]}, where[2] = {u, t};
     for (int i = 0; i < 2; i++) {
-        const int v = moved[i], c = into[i];
-        tb->last[v] = step;
-        S->pen[v] = 0.0;
-        if (tb->tau[c] > 0) {
-            const long j = tb->off[c] + tb->tail[c] % (tb->tau[c] + 1);
-            tb->var[j] = v; tb->when[j] = step; tb->tail[c]++;
-            S->pen[v] = lambda / beta;
-        }
+        const int v = moved[i];
+        S->pen[v] = tabu_push(tb, v, into[i], step) ? lambda / beta : 0.0;
         S->pp[where[i]] = (float)S->pen[v];
     }
 }
 
-ANNEAL_ATTR static void swap_loop(Swap *S, Tabu *tb, const float *noise, long nsteps, double beta_start,
+ANNEAL_ATTR static void swap_loop(Swap *S, Tabu *tb, int *out, const float *noise, long nsteps, double beta_start,
                                   double beta_max, double *E_io, double *best_io, int *best_pos, double *late_io,
                                   int *late_pos, uint64_t seed, double lambda) {
     const int n = S->n;
@@ -183,7 +208,7 @@ ANNEAL_ATTR static void swap_loop(Swap *S, Tabu *tb, const float *noise, long ns
         if (at_best && dE >= 0.0) { __builtin_memcpy(best_pos, S->pos, sizeof(int) * n); at_best = 0; }   // leaving it
         E += dE;
         swap_step(S, t, u);
-        swap_tabu(S, tb, t, u, step, beta, lambda);
+        swap_tabu(S, tb, out, t, u, step, beta, lambda);
         if (E < best) { best = E; at_best = 1; }
     }
     if (at_best) __builtin_memcpy(best_pos, S->pos, sizeof(int) * n);
@@ -210,14 +235,12 @@ void pfa_anneal_swap(const double *A, const double *B, int n, int q, const int *
         for (int b = 0; b < q; b++)
             S.kappa[(long)a * q + b] = 2.0 * B[(long)a * q + b] - B[(long)a * q + a] - B[(long)b * q + b];
     swap_fill(&S);
-    Tabu tb = {tenure, malloc(sizeof(int64_t) * (q + 1)), 0, 0, calloc(q, sizeof(long)), calloc(q, sizeof(long)),
-               malloc(sizeof(long) * n)};
-    tb.off[0] = 0;
-    for (int c = 0; c < q; c++) tb.off[c + 1] = tb.off[c] + tenure[c] + 1;
-    tb.var = malloc(sizeof(int) * tb.off[q]); tb.when = malloc(sizeof(long) * tb.off[q]);
-    for (int v = 0; v < n; v++) tb.last[v] = -1;
-    swap_loop(&S, &tb, noise, nsteps, beta_start, beta_max, E_io, best_io, best_pos, late_io, late_pos, seed, lambda);
+    Tabu tb;
+    tabu_new(&tb, n, q, tenure);
+    int *out = malloc(sizeof(int) * (n + 1));   // the variables leaving the tabu at a step
+    swap_loop(&S, &tb, out, noise, nsteps, beta_start, beta_max, E_io, best_io, best_pos, late_io, late_pos, seed,
+              lambda);
     free(S.at); free(S.Fcur); free(S.kappa); free(S.alpha); free(S.beta); free(S.ap); free(S.bp); free(S.Fa);
-    free(S.Fb); free(S.pen); free(S.pp);
-    free(tb.off); free(tb.var); free(tb.when); free(tb.head); free(tb.tail); free(tb.last);
+    free(S.Fb); free(S.pen); free(S.pp); free(out);
+    tabu_free(&tb);
 }

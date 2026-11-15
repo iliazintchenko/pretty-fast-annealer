@@ -5,6 +5,7 @@
 //   swap.c                 variables that exchange values, a fixed count per value: pfa_anneal_swap()
 //   sparse_spin.c          spins, sparse couplings: pfa_anneal_sparse_spin()
 //   sparse_categorical.c   categorical variables, sparse couplings: pfa_anneal_sparse_categorical()
+//   sparse_swap.c          exchanges, sparse couplings: pfa_anneal_sparse_swap()
 //   eliminate.c            categorical variables: pfa_eliminate(), before the anneal
 //   fold.c                 pfa_fold_spin(), pfa_fold_sparse_spin(), pfa_fold_categorical(), pfa_fold_swap(): one
 //                          state takes from another every part that it has lower, between the repetitions
@@ -15,7 +16,7 @@
 //   avx512   8 doubles per vector                 x86-64 with AVX-512
 //   avx2     4 doubles per vector                 x86-64 with AVX2 (and FMA)
 //   scalar                                        anything else
-// The sparse two draw from the tree of sums of sums.c, the same code on every path.
+// The sparse three draw from the tree of sums of sums.c, the same code on every path.
 // Build with -ffp-contract=off: each kernel rescores the winning chunk and must reproduce the pass's scores exactly,
 // so the compiler may not fuse multiply-adds in one place and not the other.
 //
@@ -131,5 +132,6 @@ const char *pfa_simd_path(void) { return SIMD_PATH; }
 #include "sums.c"
 #include "sparse_spin.c"
 #include "sparse_categorical.c"
+#include "sparse_swap.c"
 #include "eliminate.c"
 #include "fold.c"

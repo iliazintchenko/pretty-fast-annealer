@@ -118,6 +118,23 @@ _lib.pfa_anneal_swap.argtypes = [
     _i64,  # tabu tenure of each value, in steps
 ]
 _lib.pfa_anneal_swap.restype = None
+_swap_args = _lib.pfa_anneal_swap.argtypes
+_lib.pfa_anneal_sparse_swap.argtypes = [
+    _i64,  # where each row of the couplings starts
+    _i32,  # column of each stored coupling
+    _f64,  # value of each stored coupling
+    _i32,  # the coupled pair of each stored coupling
+    ctypes.c_int,  # number of coupled pairs
+    _i32,  # first variable of each coupled pair
+    _i32,  # second variable of each coupled pair, the larger
+    _f64_2d,  # table between the values, q x q
+    ctypes.c_int,  # number of variables
+    ctypes.c_int,  # number of values
+    _i32,  # value of each position
+    _i32,  # variable at each position (updated in place)
+    _f64_2d,  # F (updated in place)
+] + _swap_args[11:12] + _swap_args[12:]
+_lib.pfa_anneal_sparse_swap.restype = None
 # A, B, fields, n, q, two states as the value of each variable
 _lib.pfa_fold_swap.argtypes = [_f64_2d, _f64_2d, _f64_2d, ctypes.c_int, ctypes.c_int, _i32, _i32]
 _lib.pfa_fold_swap.restype = ctypes.c_double
@@ -658,10 +675,17 @@ def _anneal_categorical(form, fields, beta_max, num_steps, num_reps, seed, tabu_
     return values(cur_best)
 
 
+def _sparse_swap_is_faster(d, n, q, pairs):
+    """Which exchange kernel takes less time per step. The array kernel streams every pair, updates F, n q entries,
+    and does O(n) work besides; a sparse step refreshes the single moves of the exchanged variables and their
+    neighbours, (2d + 2)(q - 1) leaves, as many blocks, and their coupled pairs, (2d + 2) d. The constants, in
+    seconds, are fitted to timings of both kernels (on an Apple M4)."""
+    return (2 * d + 2) * (120e-9 * (q - 1) + 18e-9 * d) < 0.32e-9 * pairs + 0.17e-9 * n * q + 10e-9 * n
+
+
 def _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure):
     """run() with counts, on validated input: the value of each variable."""
     n, q = len(fields), len(counts)
-    A = _array(couplings, n)
     order = np.argsort(counts, kind="stable")                    # the values by count, the largest last
     order = order[counts[order] > 0]
     if len(order) < 2:                                          # one value: nothing moves
@@ -671,16 +695,29 @@ def _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, s
     sizes = counts[order]
     val = np.repeat(order, sizes).astype(np.int32)              # value of each position
     e = np.repeat(np.cumsum(sizes), sizes).astype(np.int32)     # first position of the next value
-    rs = np.concatenate(([0], np.cumsum((n - e + 63) // 64 * 64))).astype(np.int64)   # rows padded to 64 pairs
-    P = int(rs[-1])
     pairs = int(np.sum(n - e))
+    count = _count(couplings)
+    sparse = _sparse_swap_is_faster(count / n, n, q, pairs)
+    if sparse:
+        row, col, data = _entries(couplings)
+        ptr = np.concatenate(([0], np.cumsum(np.bincount(row, minlength=n)))).astype(np.int64)
+        key = np.minimum(row, col).astype(np.int64) * n + np.maximum(row, col)
+        uniq, pid = np.unique(key, return_inverse=True)
+        stored = (ptr, col.astype(np.int32), data, pid.astype(np.int32), len(uniq), (uniq // n).astype(np.int32),
+                  (uniq % n).astype(np.int32))
+        A = couplings if isinstance(couplings, np.ndarray) else couplings.tocsr()
+    else:
+        A = _array(couplings, n)
+        rs = np.concatenate(([0], np.cumsum((n - e + 63) // 64 * 64))).astype(np.int64)   # rows padded to 64 pairs
+        P = int(rs[-1])
     # tenure of a variable at value v: tabu_tenure times its mean number of steps between moves, which is the pairs
     # over the positions of the other values
     tenure = np.zeros(q, dtype=np.int64)
     tenure[order] = (tabu_tenure * pairs / (n - sizes)).astype(np.int64)
     rows = np.arange(n)
     rng = np.random.default_rng(seed)
-    fold = lambda a, b: _lib.pfa_fold_swap(A, table, fields, n, q, a, b)
+    A_fold = A if isinstance(A, np.ndarray) else _array(couplings, n)   # the fold reads the array
+    fold = lambda a, b: _lib.pfa_fold_swap(A_fold, table, fields, n, q, a, b)
     x_best = None
     stale = 0   # 1 after the first repetition, plus the restarts so far that did not lower the best energy
     for rep in range(num_reps):
@@ -694,17 +731,23 @@ def _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, s
         x[pos] = val
         F = np.ascontiguousarray(fields + A @ table[x])          # F[r, k] = f_r(k) + sum_s A_rs B(k, x_s)
         energy = float(fields[rows, x].sum() + 0.5 * (F[rows, x] - fields[rows, x]).sum())
-        D = np.empty(P)
-        noise_vec = -np.log(-np.log(rng.random(P)))
-        noise_buffer = np.concatenate((noise_vec, noise_vec)).astype(np.float32)
         pos_first, pos_late = pos.copy(), np.empty(n, dtype=np.int32)
         energy_c = ctypes.c_double(energy)
         first_c, late_c = ctypes.c_double(energy), ctypes.c_double()
-        _lib.pfa_anneal_swap(
-            A, table, n, q, val, e, rs, pos, F, D, noise_buffer, num_steps, beta_start, beta_max,
-            ctypes.byref(energy_c), ctypes.byref(first_c), pos_first, ctypes.byref(late_c), pos_late,
-            int(rng.integers(1, 2**63)), tabu_lambda, tenure,
-        )
+        lowest = ctypes.byref(first_c), pos_first, ctypes.byref(late_c), pos_late
+        if sparse:
+            _lib.pfa_anneal_sparse_swap(
+                *stored, table, n, q, val, pos, F, num_steps, beta_start, beta_max, ctypes.byref(energy_c), *lowest,
+                int(rng.integers(1, 2**63)), tabu_lambda, tenure,
+            )
+        else:
+            D = np.empty(P)
+            noise_vec = -np.log(-np.log(rng.random(P)))
+            noise_buffer = np.concatenate((noise_vec, noise_vec)).astype(np.float32)
+            _lib.pfa_anneal_swap(
+                A, table, n, q, val, e, rs, pos, F, D, noise_buffer, num_steps, beta_start, beta_max,
+                ctypes.byref(energy_c), *lowest, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
+            )
         states = []
         for value, p in ((first_c.value, pos_first), (late_c.value, pos_late)):
             x = np.empty(n, dtype=np.int32)
