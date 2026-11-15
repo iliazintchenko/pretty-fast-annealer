@@ -145,14 +145,28 @@ state of low energy. After the repetition, the lowest of three states, these two
 the best state and takes from the other two every cluster they have lower. A repetition that ends above the best
 state still contributes its good parts, and brings nothing only when the best energy stays where it was.
 
-How much this gives depends on how two low states differ. If every two variables are coupled, or the states differ on
-so many variables that the clusters merge, there is one cluster and the lower state is kept, as without
-recombination. If the couplings are sparse and fields or a few strong couplings hold most variables in place, low
-states differ in many small clusters, and the best state improves cluster by cluster. On problems of that kind
-(side-chain packing, MAX-2-SAT, sparse glasses with fields or with couplings on several scales), with R = 10 and
-R = 30 the final energy was lower in 82 of 84 trials (seven problems, six seeds, both values of R) than with the
-earlier scheme, no recombination and every restart one step colder than the last whatever it brought. On dense problems and a random sparse glass
-with couplings of equal magnitude and no fields, the results stayed within the spread between seeds.
+How much this gives depends on how two low states differ. If the couplings are sparse and fields or a few strong
+couplings hold most variables in place, low states differ in many small clusters, and the best state improves cluster
+by cluster. On problems of that kind (side-chain packing, MAX-2-SAT, sparse glasses with fields or with couplings on
+several scales), with R = 10 and R = 30 the final energy was lower in 82 of 84 trials (seven problems, six seeds, both
+values of R) than with the earlier scheme, no recombination and every restart one step colder than the last whatever
+it brought. If every two variables are coupled, or the states differ on so many variables that the clusters merge,
+there is one cluster, and the fold alone keeps the lower state.
+
+**Re-annealing.** What the fold cannot take, the variables on which the states still differ, is annealed again as a
+problem of its own. The agreeing variables stay fixed and their couplings to the differing ones go into the fields;
+the differing variables start from random values and anneal from β = 0 to `beta_max`, with steps in proportion to
+their share of the moves. What the anneal finds folds into the best state. When that lowers it, the anneal's two
+states are new material: the variables on which they differ from the best state are annealed again, round after
+round, until an anneal brings nothing. Two low states of a dense problem that share most variables usually hold the
+shared part right and the rest in two arrangements of about the same cost, and the anneal of the rest alone, under the
+shared part as fields, looks for a third. Two states that share nothing leave nothing to fix, and nothing is done.
+
+On quadratic assignment, where every two variables are coupled and the fold alone takes nothing, the re-annealing
+cut the distance to the best known values by three to five times at equal time on the instances whose low states
+share many assignments (distances on a grid, structured flows), and left the random instances, whose low states share
+almost nothing, within the spread between seeds. On spin glasses, dense or sparse, the results stayed within the
+spread between seeds at equal steps, the re-anneals adding up to 40% to the time on the dense ones.
 
 **Exchanges.** With `counts`, the number of variables at each value is fixed: k of n items chosen, a graph cut into
 parts of given sizes, a permutation with one variable per value. The couplings factor, T_rs(a, b) = A_rs B(a, b),
@@ -409,6 +423,10 @@ with more values, which reads both layouts as the elimination does.
   and takes clusters from the other two, round after round until its energy, a float64, no longer falls. The first
   repetition has only its two. A repetition brought nothing when that energy is not below the energy of the state it
   started from.
+- **Re-anneals.** The problem of the differing variables is built from the kernel's own inputs: their couplings among
+  themselves, their fields plus their couplings to the fixed variables at their values, and with `counts` the counts
+  of their own values. `run()` picks the kernel for it again. The anneal returns its two states as whole states with
+  the energy of the fixed part added, so the fold and the rounds see nothing special.
 
 ### Exchanges
 
@@ -498,7 +516,7 @@ each variable (int64). Its parameters:
 | `table` | with `counts`, the q × q symmetric table between the values | required with `counts` | |
 | `beta_max` | the final inverse temperature | `1.0` | Measured in 1/energy: scaling the energy by α scales the best `beta_max` by 1/α, so the default suits only ΔE of order one. A linear schedule is nearly as good as optimized ones (Isakov et al.). |
 | `num_steps` | steps per repetition, the length of the anneal | `1000` | The budget of one repetition: on the array kernels num_steps · n field updates, or num_steps / V moves per variable. Longer anneals track the cooling more closely and reach lower energies. |
-| `num_reps` | repetitions of the anneal, R | `1` | The first starts from a random value for every variable; each later one restarts from the best state so far with β rising from u/(R−1)·`beta_max`, u being 1 plus the number of restarts so far that did not lower the best energy (see Repetitions). After each repetition the best state takes the clusters of variables that the repetition has lower (see Recombination). |
+| `num_reps` | repetitions of the anneal, R | `1` | The first starts from a random value for every variable; each later one restarts from the best state so far with β rising from u/(R−1)·`beta_max`, u being 1 plus the number of restarts so far that did not lower the best energy (see Repetitions). After each repetition the best state takes the clusters of variables that the repetition has lower, and the variables that still differ are annealed again (see Recombination). |
 | `seed` | random seed | `42` | Sets the first repetition's state and every repetition's Gumbel noise vector and offsets, or on the sparse kernels its draws, so results are reproducible. |
 | `tabu_lambda` | the tabu penalty λ, in temperatures | `3.0` | Divides the weight of a variable's moves by e^λ just after it moved (see Tabu). Rarely worth changing. |
 | `tabu_tenure` | the tabu tenure, as a fraction of the number of variables V | `0.25` | A variable stays tabu for `tabu_tenure` · V steps, with `counts` for `tabu_tenure` times the mean number of steps between two moves of a variable at its value; 0 turns the tabu off. Rarely worth changing. |
