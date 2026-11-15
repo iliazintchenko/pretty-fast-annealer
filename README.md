@@ -25,14 +25,17 @@ E(s) = ½ sᵀ J s + hᵀ s,        ΔE_j = −2 s_j (h_j + Σ_l J_jl s_l)
 ```
 
 the case T_rs(s_r, s_s) = J_rs s_r s_s and f_r(s_r) = h_r s_r. A problem over 0/1 variables x is the same problem in
-s = 2x − 1 (`pfa.from_binary`), and constraints enter as penalties (see Constraints). PFA is an annealer that never
-rejects: every step makes one move, chosen among all moves of all variables by its Boltzmann weight.
+s = 2x − 1 (`pfa.from_binary`), and constraints enter as penalties (see Constraints). When the number of variables at
+each value is fixed, k of n chosen, parts of given sizes, a permutation, a step exchanges the values of two variables
+instead (see Exchanges). PFA is an annealer that never rejects: every step makes one move, chosen among all moves of
+all variables by its Boltzmann weight.
 
 ```python
 import pfa
 
 spins = pfa.run(couplings, fields, beta_max=1.0, num_steps=100 * len(couplings), num_reps=10)
 values = pfa.run(couplings, fields, sizes=sizes, num_steps=100 * len(sizes), num_reps=10)
+values = pfa.run(couplings, fields, counts=counts, table=table, num_steps=100 * len(couplings), num_reps=10)
 ```
 
 ## Philosophy
@@ -151,6 +154,27 @@ R = 30 the final energy was lower in 82 of 84 trials (seven problems, six seeds,
 earlier scheme, no recombination and every restart one step colder than the last whatever it brought. On dense problems and a random sparse glass
 with couplings of equal magnitude and no fields, the results stayed within the spread between seeds.
 
+**Exchanges.** With `counts`, the number of variables at each value is fixed: k of n items chosen, a graph cut into
+parts of given sizes, a permutation with one variable per value. The couplings factor, T_rs(a, b) = A_rs B(a, b),
+with A between the variables and B between the values (flows and distances in quadratic assignment, edge weights and
+"same part or not" in partitioning). A step exchanges the values a and b of two variables r and s, chosen among all
+pairs at different values by the same rule, and changes the energy by
+
+```
+ΔE = (F_r(b) − F_r(a)) + (F_s(a) − F_s(b)) + A_rs κ(a, b),        κ(a, b) = 2 B(a, b) − B(a, a) − B(b, b)
+```
+
+the two single moves plus a correction for the pair's own term, which both F's count with the old values. The counts
+never change, so there is no penalty to hold them and no barrier between feasible states. The tabu holds both
+variables, each for `tabu_tenure` times the mean number of steps between two moves of a variable at its new value
+(the pairs divided by the positions of the other values: n/8 steps in a permutation, k/4 for the k chosen of n).
+Recombination needs clusters that keep the counts: besides the pairs with I_rs ≠ 0, the differing variables are
+joined along the cycles of their exchanges, the arcs a_r → b_r on the values, where every value has as many arcs in
+as out. Every cluster then moves as many variables into each value as out of it, and taking it keeps the counts. For a
+permutation the cycles are those of a⁻¹b, and the result is again the lowest of the 2^m states; otherwise which arcs
+form a cycle is one choice among several, which loses choices and nothing else. Elimination does not apply: a value
+is dominated only against the states that keep the counts.
+
 ## Compared with simulated annealing
 
 SA here follows Isakov et al.,
@@ -221,9 +245,10 @@ low temperature (PFA at β, SA at 2β, see Equilibrium), PFA sits lower in energ
 
 ## Implementation
 
-The annealer runs in compiled C with SIMD, on one core, on any couplings and fields. It has four kernels, the compiled
+The annealer runs in compiled C with SIMD, on one core, on any couplings and fields. It has five kernels, the compiled
 anneal loops: one for spins and one for variables with more values, each with the couplings either as an n × n array
-(the array kernels) or as lists of the nonzero ones (the sparse kernels, see Sparse couplings). Value 0 of every
+(the array kernels) or as lists of the nonzero ones (the sparse kernels, see Sparse couplings), and one for variables
+that exchange values (see Exchanges). Value 0 of every
 variable has no field and no couplings (any problem can be shifted to that form, see `sizes` under Usage), so each of
 the other values has a row of the couplings, n rows in all, and a move reads the row of the value it leaves and of
 the value it enters, none for value 0. On the array kernels those are full float64 rows, zeros included, and one pass
@@ -370,8 +395,11 @@ with more values, which reads both layouts as the elimination does.
 - **Clusters.** Each differing variable starts as its own set, and two sets are merged whenever a variable of one
   interacts with a variable of the other (union-find). Each set then has one sum, Δ(G). The work is the couplings of
   the differing variables: their stored neighbours on the sparse kernels, their rows of the array otherwise.
-- **No tolerance.** Two differing variables interact when I_rs is not exactly 0. Where it is nonzero only by rounding,
-  two clusters are merged that could have been chosen separately: a choice is lost, exactness is not.
+- **No tolerance on the interactions.** Two differing variables interact when I_rs is not exactly 0. Where it is
+  nonzero only by rounding, two clusters are merged that could have been chosen separately: a choice is lost,
+  exactness is not. A cluster is taken when Δ(G) is below 0 by more than the rounding of its own sum, 2⁻⁴⁰ of the
+  magnitudes summed: two arrangements of a cluster that tie exactly would otherwise be taken back and forth between
+  the rounds, each time by a rounding error.
 - **Two states per repetition.** Each kernel keeps the lowest state of the first and of the second half of its
   steps: at the midpoint the current state becomes the lowest so far of the second half. Where the split falls
   matters little: at a quarter, three quarters or nine tenths of the steps the results were the same within the
@@ -382,38 +410,75 @@ with more values, which reads both layouts as the elimination does.
   repetition has only its two. A repetition brought nothing when that energy is not below the energy of the state it
   started from.
 
+### Exchanges
+
+The moves are pairs, so the exchange kernel (`swap.c`) keeps the ΔE of every pair and selects among the pairs the way
+the spin kernel selects among spins.
+
+- **Positions.** The variables sit in positions sorted by value, and a move exchanges the variables of two positions.
+  The pairs of a position with the positions of the later values are one contiguous stretch, so no same-value pair is
+  ever scored: k(n − k) pairs for k chosen of n, n(n − 1)/2 for a permutation. The values are ordered by count with
+  the largest last, which leaves the fewest rows.
+- **Two tables.** F_r(k) for every variable and value, n × q float64, and D, the ΔE of every pair, float64. After the
+  exchange of positions t and u (variables r, s at values a, b), with α_w = A_wr − A_ws over the variables and
+  β_k = B(k, b) − B(k, a) over the values,
+
+  ```
+  F_w(k) += α_w β_k                       every w: A_rr = A_ss = 0 makes r and s fit the rule
+  D_xy   −= (α_x − α_y) (β_x − β_y)       x, y positions other than t, u, with the α, β of their variable and value
+  ```
+
+  The second is Taillard's update for quadratic assignment and holds for any symmetric B. The pairs of t and of u
+  themselves are recomputed from F, O(1) each from the two columns F(a) and F(b) collected during the update of F.
+- **One pass.** The update of D is applied in the next step's pass, which scores every pair −ΔE − c_x − c_y + g/β in
+  float32 and selects as the spin pass does, with pairs in place of spins: D read and written (16 bytes), one noise
+  value (4 bytes) and, from cache, the α, β and tabu penalty of the column. One noise value per pair, a vector of the
+  number of pairs stored twice. Rows are padded to multiples of 64 pairs with +∞, so a chunk never straddles two rows
+  and the rescore of the winning chunk works as for spins. The recomputed pairs are stored with the update that pass
+  will subtract added back; that is one rounding, and every pair is recomputed whenever one of its positions moves,
+  so errors do not build up.
+- **Cost.** Per step, one pass over the pairs and one rank-1 update of F, nq multiply-adds. Memory: 8 bytes per pair
+  for D, 4 for its noise, 8nq for F, and the user's A and B.
+- **Tabu.** The penalty of a variable is a float per position, read per row and per column of the pass. Each value
+  keeps a queue of the variables that moved to it, with the step; the ones whose tenure is over leave at the front.
+- **Recombination.** `pfa_fold_swap` joins the differing variables along the cycles of their exchanges before summing
+  the clusters: a walk over the unused arcs from any value closes a cycle whenever it returns to a value it has
+  visited, and can only end where it started.
+
 ## Usage
 
-`make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the four kernels: `spin.c`
-and `categorical.c` for couplings as an array, and `sparse_spin.c` and `sparse_categorical.c`, which draw from the
-tree of sums of `sums.c`; and `eliminate.c` and `fold.c`. The two array kernels use the one SIMD path that matches
-the machine; the rest is the same code on every path:
+`make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the five kernels: `spin.c`
+and `categorical.c` for couplings as an array, `sparse_spin.c` and `sparse_categorical.c`, which draw from the
+tree of sums of `sums.c`, and `swap.c` for variables that exchange values; and `eliminate.c` and `fold.c`. The three
+array kernels use the one SIMD path that matches the machine; the rest is the same code on every path:
 
 | path | files | used on |
 |---|---|---|
-| SVE | `spin_sve.c`, `categorical_sve.c` | ARM with SVE (Graviton3 and 4, NVIDIA Grace, A64FX, ...) |
-| NEON | `spin_neon.c`, `categorical_neon.c` | every other 64-bit ARM (Apple Silicon, Graviton2, Ampere Altra, ...) |
-| AVX-512 | `spin_avx512.c`, `categorical_avx512.c` | x86-64 with AVX-512 |
-| AVX2 | `spin_avx2.c`, `categorical_avx2.c` | x86-64 with AVX2 |
-| scalar | `spin_scalar.c`, `categorical_scalar.c` | anything else |
+| SVE | `spin_sve.c`, `categorical_sve.c`, `swap_sve.c` | ARM with SVE (Graviton3 and 4, NVIDIA Grace, A64FX, ...) |
+| NEON | `spin_neon.c`, `categorical_neon.c`, `swap_neon.c` | every other 64-bit ARM (Apple Silicon, Graviton2, Ampere Altra, ...) |
+| AVX-512 | `spin_avx512.c`, `categorical_avx512.c`, `swap_avx512.c` | x86-64 with AVX-512 |
+| AVX2 | `spin_avx2.c`, `categorical_avx2.c`, `swap_avx2.c` | x86-64 with AVX2 |
+| scalar | `spin_scalar.c`, `categorical_scalar.c`, `swap_scalar.c` | anything else |
 
 `pfa.simd_path()` reports which one was built; `make -B ARCH_FLAGS="-mavx2 -mfma"` rebuilds for another
 target.
 
-`pfa.run()` returns the lowest-energy state found, as ±1 spins (int8), or with `sizes` as the value of each variable
-(int64). Its parameters:
+`pfa.run()` returns the lowest-energy state found, as ±1 spins (int8), or with `sizes` or `counts` as the value of
+each variable (int64). Its parameters:
 
 | parameter | what it is | default | notes |
 |---|---|---|---|
-| `couplings` | the couplings, an n × n symmetric matrix with zero diagonal: J for spins, or with `sizes` between the values; an array or a `scipy.sparse` matrix | required | The format does not change the result: `run()` picks the array or the sparse kernels from the number of nonzero couplings (see Sparse couplings). The array kernels read a C-contiguous float64 array in place; any other input is converted once, a `scipy.sparse` matrix to n × n float64. If that array would take more than half of the machine's memory, the kernel that needs less memory runs. |
-| `fields` | the fields, a length-n vector: h for spins, or with `sizes` of the values | `None` (zeros) | Enter only through F, so they cost nothing per step. |
+| `couplings` | the couplings, an n × n symmetric matrix with zero diagonal: J for spins, with `sizes` between the values, with `counts` A between the variables; an array or a `scipy.sparse` matrix | required | The format does not change the result: `run()` picks the array or the sparse kernels from the number of nonzero couplings (see Sparse couplings). The array kernels read a C-contiguous float64 array in place; any other input is converted once, a `scipy.sparse` matrix to n × n float64. If that array would take more than half of the machine's memory, the kernel that needs less memory runs. |
+| `fields` | the fields, a length-n vector: h for spins, or with `sizes` of the values; with `counts` n × q, the field of each variable at each value | `None` (zeros) | Enter only through F, so they cost nothing per step. |
 | `sizes` | the number of values of each variable | `None` (spins) | Variable r takes a value in 0 … `sizes[r]` − 1. Each value other than 0 has a row and column of `couplings` and an entry of `fields`, ordered by variable (variable 0's values 1 … `sizes[0]` − 1 first), so n = Σ (`sizes[r]` − 1). The energy is the fields of the values taken plus each coupling between two of them once: ½ xᵀ C x + fᵀ x with x_k = 1 for the values taken. Couplings between values of the same variable must be zero. Values that no optimum needs are removed first (see Elimination). |
+| `counts` | the number of variables at each of q values, summing to n | `None` | Variable r takes a value in 0 … q − 1, and `counts[v]` variables are at value v throughout (see Exchanges). The energy is Σ_r `fields[r, x_r]` + Σ_{r<s} `couplings[r, s]` · `table[x_r, x_s]`. k of n: `counts` (n − k, k) with `table` [[0, 0], [0, 1]]; parts of given sizes: `table` 1 − I to count the edges between parts; a permutation: `counts` all 1, `table` the distances. |
+| `table` | with `counts`, the q × q symmetric table between the values | required with `counts` | |
 | `beta_max` | the final inverse temperature | `1.0` | Measured in 1/energy: scaling the energy by α scales the best `beta_max` by 1/α, so the default suits only ΔE of order one. A linear schedule is nearly as good as optimized ones (Isakov et al.). |
 | `num_steps` | steps per repetition, the length of the anneal | `1000` | The budget of one repetition: on the array kernels num_steps · n field updates, or num_steps / V moves per variable. Longer anneals track the cooling more closely and reach lower energies. |
 | `num_reps` | repetitions of the anneal, R | `1` | The first starts from a random value for every variable; each later one restarts from the best state so far with β rising from u/(R−1)·`beta_max`, u being 1 plus the number of restarts so far that did not lower the best energy (see Repetitions). After each repetition the best state takes the clusters of variables that the repetition has lower (see Recombination). |
 | `seed` | random seed | `42` | Sets the first repetition's state and every repetition's Gumbel noise vector and offsets, or on the sparse kernels its draws, so results are reproducible. |
 | `tabu_lambda` | the tabu penalty λ, in temperatures | `3.0` | Divides the weight of a variable's moves by e^λ just after it moved (see Tabu). Rarely worth changing. |
-| `tabu_tenure` | the tabu tenure, as a fraction of the number of variables V | `0.25` | A variable stays tabu for `tabu_tenure` · V steps; 0 turns the tabu off. Rarely worth changing. |
+| `tabu_tenure` | the tabu tenure, as a fraction of the number of variables V | `0.25` | A variable stays tabu for `tabu_tenure` · V steps, with `counts` for `tabu_tenure` times the mean number of steps between two moves of a variable at its value; 0 turns the tabu off. Rarely worth changing. |
 
 A problem in one-hot form, ½ xᵀ C x + fᵀ x over binary x with one 1 per group, converts with
 `pfa.from_one_hot(couplings, fields, groups)`, with `groups[i]` the variable that x_i belongs to. It returns the
@@ -422,4 +487,5 @@ result back. A problem over 0/1 variables converts to spins with `pfa.from_binar
 `pfa.energy(state, couplings, fields, offset)` is ½ sᵀ J s + hᵀ s + offset for a ±1 or a 0/1 state.
 
 `examples/spins.py` solves a small problem given over 0/1 variables, `examples/colouring.py` colours a graph with
-several values per variable, and `examples/throughput.py` measures steps per second.
+several values per variable, `examples/qap.py` solves a quadratic assignment and `examples/partition.py` cuts a graph
+in two equal parts, both by exchanges, and `examples/throughput.py` measures steps per second.

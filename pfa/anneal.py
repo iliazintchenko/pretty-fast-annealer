@@ -93,6 +93,34 @@ _lib.pfa_fold_sparse_spin.argtypes = _lib.pfa_anneal_sparse_spin.argtypes[:3] + 
 _lib.pfa_fold_sparse_spin.restype = ctypes.c_double
 _lib.pfa_fold_categorical.argtypes = _lib.pfa_eliminate.argtypes[:9] + [_i32, _i32]   # two states, as rows
 _lib.pfa_fold_categorical.restype = ctypes.c_double
+_lib.pfa_anneal_swap.argtypes = [
+    _f64_2d,  # couplings between the variables, n x n
+    _f64_2d,  # table between the values, q x q
+    ctypes.c_int,  # number of variables
+    ctypes.c_int,  # number of values
+    _i32,  # value of each position
+    _i32,  # first position of each position's row of pairs: the first position of the next value
+    _i64,  # where each position's row starts in the pairs, n + 1
+    _i32,  # variable at each position (updated in place)
+    _f64_2d,  # F: the field of every variable at every value given the others, n x q (updated in place)
+    _f64,  # dE of every pair, row by row (out)
+    _f32,  # noise buffer, the noise vector stored twice
+    ctypes.c_long,  # number of steps
+    ctypes.c_double,  # beta at the start of the ramp
+    ctypes.c_double,  # beta_max
+    ctypes.POINTER(ctypes.c_double),  # energy (in: initial, out: final)
+    ctypes.POINTER(ctypes.c_double),  # lowest energy of the first half of the steps (in: initial)
+    _i32,  # positions of that state (in: initial)
+    ctypes.POINTER(ctypes.c_double),  # lowest energy of the second half (out)
+    _i32,  # positions of that state (out)
+    ctypes.c_uint64,  # seed for the per-step noise offsets
+    ctypes.c_double,  # tabu penalty lambda, in temperatures
+    _i64,  # tabu tenure of each value, in steps
+]
+_lib.pfa_anneal_swap.restype = None
+# A, B, fields, n, q, two states as the value of each variable
+_lib.pfa_fold_swap.argtypes = [_f64_2d, _f64_2d, _f64_2d, ctypes.c_int, ctypes.c_int, _i32, _i32]
+_lib.pfa_fold_swap.restype = ctypes.c_double
 _lib.pfa_from_one_hot.argtypes = [
     _f64_2d,  # one-hot couplings over all slots
     _f64,  # one-hot fields
@@ -119,6 +147,8 @@ def run(
     couplings: np.ndarray,
     fields: np.ndarray | None = None,
     sizes: np.ndarray | None = None,
+    counts: np.ndarray | None = None,
+    table: np.ndarray | None = None,
     beta_max: float = 1.0,
     num_steps: int = 1000,
     num_reps: int = 1,
@@ -170,10 +200,23 @@ def run(
     energy always remains. from_one_hot() converts the one-hot
     form.
 
+    With counts, the variables exchange values: variable r takes a value x_r
+    in 0 .. q - 1, counts[v] variables at value v throughout, and the energy is
+        sum over r of fields[r, x_r] + sum over r < s of couplings[r, s] * table[x_r, x_s]
+    with couplings n x n between the variables, table q x q between the values
+    and fields n x q. Every step exchanges the values of two variables, chosen
+    among all pairs at different values by the same rule, so the counts never
+    change: k of n (counts (n - k, k)), balanced partitions (equal counts),
+    permutations (counts all 1: quadratic assignment, tours by position).
+    The tabu holds a variable for tabu_tenure times the mean number of steps
+    between two moves of a variable at its value.
+
     Parameters:
         couplings (np.ndarray or scipy.sparse matrix): The couplings matrix for the system, such that couplings[i,j] is the coupling between spin_i and spin_j.
         fields (np.ndarray, optional): External field terms. Defaults to None.
         sizes (np.ndarray, optional): For categorical problems, the number of values of each variable. Defaults to None.
+        counts (np.ndarray, optional): For variables that exchange values, the number of variables at each value. Defaults to None.
+        table (np.ndarray, optional): With counts, the q x q symmetric table between the values. Defaults to None.
         beta_max (float): The maximum inverse temperature. Defaults to 1.0.
         num_steps (int): Steps per repetition, each flipping a spin or changing one variable's value. Defaults to 1000.
         num_reps (int): Number of repetitions: the first from random spins, each further one from the best state so far, which takes the parts each repetition has lower. Defaults to 1.
@@ -183,12 +226,28 @@ def run(
         tabu_tenure (float): How long a spin stays tabu, as a fraction of n flips; 0 turns the tabu
             off. Defaults to 0.25; rarely worth changing.
     Returns:
-        np.ndarray: The lowest-energy state found: +-1 spins, or with sizes the value of each variable.
+        np.ndarray: The lowest-energy state found: +-1 spins, or with sizes or counts the value of each variable.
     Raises:
         ValueError: If input parameters are invalid.
     """
 
-    validate(couplings, fields)
+    if counts is not None:
+        if sizes is not None:
+            raise ValueError("sizes and counts cannot both be given")
+        if table is None:
+            raise ValueError("counts needs table, the couplings between the values")
+        validate(couplings)
+        counts = np.asarray(counts, dtype=np.int64)
+        table = np.ascontiguousarray(table, dtype=np.float64)
+        n, q = couplings.shape[0], len(counts)
+        if np.any(counts < 0) or int(counts.sum()) != n:
+            raise ValueError("counts must be non-negative and sum to the number of variables")
+        if table.shape != (q, q) or not np.array_equal(table, table.T):
+            raise ValueError("table must be a symmetric q x q matrix, q the length of counts")
+        if fields is not None and np.shape(fields) != (n, q):
+            raise ValueError("fields must be n x q with counts")
+    else:
+        validate(couplings, fields)
     sparse = hasattr(couplings, "tocsr")
     if sparse:
         couplings = couplings.tocsr().astype(np.float64)
@@ -218,6 +277,10 @@ def run(
         raise ValueError("tabu_lambda must be non-negative")
     if not 0.0 <= tabu_tenure <= 1.0:
         raise ValueError("tabu_tenure must be between 0 and 1")
+    if counts is not None:
+        fields = np.zeros((n, q)) if fields is None else np.ascontiguousarray(fields, dtype=np.float64)
+        return _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, seed, tabu_lambda,
+                         tabu_tenure)
     fields = np.zeros(couplings.shape[0]) if fields is None else np.ascontiguousarray(fields, dtype=np.float64)
     if sizes is not None:
         return _run_categorical(couplings, fields, sizes, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure)
@@ -593,6 +656,66 @@ def _anneal_categorical(form, fields, beta_max, num_steps, num_reps, seed, tabu_
         stale += rep == 0 or not energy_new < energy
 
     return values(cur_best)
+
+
+def _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure):
+    """run() with counts, on validated input: the value of each variable."""
+    n, q = len(fields), len(counts)
+    A = _array(couplings, n)
+    order = np.argsort(counts, kind="stable")                    # the values by count, the largest last
+    order = order[counts[order] > 0]
+    if len(order) < 2:                                          # one value: nothing moves
+        return np.full(n, order[0], dtype=np.int64)
+    block = np.empty(q, dtype=np.int64)                         # block of each value
+    block[order] = np.arange(len(order))
+    sizes = counts[order]
+    val = np.repeat(order, sizes).astype(np.int32)              # value of each position
+    e = np.repeat(np.cumsum(sizes), sizes).astype(np.int32)     # first position of the next value
+    rs = np.concatenate(([0], np.cumsum((n - e + 63) // 64 * 64))).astype(np.int64)   # rows padded to 64 pairs
+    P = int(rs[-1])
+    pairs = int(np.sum(n - e))
+    # tenure of a variable at value v: tabu_tenure times its mean number of steps between moves, which is the pairs
+    # over the positions of the other values
+    tenure = np.zeros(q, dtype=np.int64)
+    tenure[order] = (tabu_tenure * pairs / (n - sizes)).astype(np.int64)
+    rows = np.arange(n)
+    rng = np.random.default_rng(seed)
+    fold = lambda a, b: _lib.pfa_fold_swap(A, table, fields, n, q, a, b)
+    x_best = None
+    stale = 0   # 1 after the first repetition, plus the restarts so far that did not lower the best energy
+    for rep in range(num_reps):
+        if rep == 0:
+            pos = rng.permutation(n).astype(np.int32)
+            beta_start = 0.0
+        else:
+            pos = np.argsort(block[x_best], kind="stable").astype(np.int32)   # the variables by block of their value
+            beta_start = beta_max * stale / (num_reps - 1)
+        x = np.empty(n, dtype=np.int32)
+        x[pos] = val
+        F = np.ascontiguousarray(fields + A @ table[x])          # F[r, k] = f_r(k) + sum_s A_rs B(k, x_s)
+        energy = float(fields[rows, x].sum() + 0.5 * (F[rows, x] - fields[rows, x]).sum())
+        D = np.empty(P)
+        noise_vec = -np.log(-np.log(rng.random(P)))
+        noise_buffer = np.concatenate((noise_vec, noise_vec)).astype(np.float32)
+        pos_first, pos_late = pos.copy(), np.empty(n, dtype=np.int32)
+        energy_c = ctypes.c_double(energy)
+        first_c, late_c = ctypes.c_double(energy), ctypes.c_double()
+        _lib.pfa_anneal_swap(
+            A, table, n, q, val, e, rs, pos, F, D, noise_buffer, num_steps, beta_start, beta_max,
+            ctypes.byref(energy_c), ctypes.byref(first_c), pos_first, ctypes.byref(late_c), pos_late,
+            int(rng.integers(1, 2**63)), tabu_lambda, tenure,
+        )
+        states = []
+        for value, p in ((first_c.value, pos_first), (late_c.value, pos_late)):
+            x = np.empty(n, dtype=np.int32)
+            x[p] = val
+            states.append((value, x))
+        if rep:
+            states.append((energy, x_best))
+        energy_new, x_best = _folded(fold, states)
+        stale += rep == 0 or not energy_new < energy
+
+    return x_best.astype(np.int64)
 
 
 def _one_hot_layout(groups):
