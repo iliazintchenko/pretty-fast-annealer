@@ -2,8 +2,9 @@
 // few others, with the same schedule, moves, tabu and bookkeeping. A is stored by rows of nonzero entries (ptr, idx,
 // val; symmetric, columns ascending), and each coupled pair r < s has a number, pid[e] at both of its entries.
 //   - F_r(k) is kept for every variable and value and changes on the two exchanged variables and their neighbours.
-//   - The move is drawn with probability proportional to exp(beta x), x = -dE - pen_r - pen_s, in two parts. For a
-//     pair with A_rs = 0, x = x_r(b) + x_s(a) with x_r(b) = -(F_r(b) - F_r(a_r)) - pen_r the single move of r to b, so
+//   - The move is drawn with probability proportional to exp(beta x), x = -dE - tab_r(b) - tab_s(a) with tab the
+//     tabu penalties by variable and value, in two parts. For a pair with A_rs = 0, x = x_r(b) + x_s(a) with
+//     x_r(b) = -(F_r(b) - F_r(a_r)) - tab_r(b) the single move of r to b, so
 //     the weights factor: the variables at value a form the class a -> b with the sum Z(a -> b) of their weights, and
 //     the uncoupled pairs of the block of values (a, b) weigh Z(a -> b) Z(b -> a) - S(a, b), S the same products over
 //     the coupled pairs of the block, kept as a running sum. A draw picks a block by that weight, then one variable
@@ -98,7 +99,8 @@ typedef struct {
     const double *B; double *kappa;
     int *start, *count;                     // positions of each value: start[v] .. start[v] + count[v]
     int *pos, *at, *x;                      // variable at each position; position and value of each variable
-    double *F, *Fcur, *pen;                 // F by variable and value; F of the current value; tabu penalties
+    double *F, *Fcur, *tab;                 // F by variable and value; F of the current value; tabu penalties by
+                                            // variable and value
     Tree L, K, C;                           // the classes, the blocks, the coupled pairs
     int *ba, *bb;                           // the values of each block
     double *x0c, *fac, X0, beta0;           // see above
@@ -120,14 +122,15 @@ static inline long ss_leaf(const SS *S, int w, int b) {
     return (long)ss_cls(S, S->x[w], b) * S->P + (S->at[w] - S->start[S->x[w]]);
 }
 static inline double ss_xleaf(const SS *S, int w, int b) {   // x of the single move of w to b
-    return S->x[w] == b ? -__builtin_inf() : (S->Fcur[w] - S->F[(long)w * S->q + b]) - S->pen[w];
+    return S->x[w] == b ? -__builtin_inf() : (S->Fcur[w] - S->F[(long)w * S->q + b]) - S->tab[(long)w * S->q + b];
 }
 static inline double ss_dE(const SS *S, int r, int s, double Ars) {   // dE of the exchange of r and s
     const int a = S->x[r], b = S->x[s], q = S->q;
     return (S->F[(long)r * q + b] - S->Fcur[r]) + (S->F[(long)s * q + a] - S->Fcur[s]) + Ars * S->kappa[a * q + b];
 }
 static inline double ss_xpair(const SS *S, int r, int s, double Ars) {   // x of the coupled pair r, s
-    return S->x[r] == S->x[s] ? -__builtin_inf() : -ss_dE(S, r, s, Ars) - S->pen[r] - S->pen[s];
+    return S->x[r] == S->x[s] ? -__builtin_inf()
+                              : -ss_dE(S, r, s, Ars) - S->tab[(long)r * S->q + S->x[s]] - S->tab[(long)s * S->q + S->x[r]];
 }
 static inline double ss_Ars(const SS *S, int r, int s) {   // A_rs, by bisection in row r
     int64_t lo = S->ptr[r], hi = S->ptr[r + 1];
@@ -302,7 +305,7 @@ static void ss_draw(SS *S, double beta, uint64_t *rng, int *r_out, int *s_out) {
     }
 }
 
-static void sparse_swap_loop(SS *S, Tabu *tb, int *out, int *moved, long nsteps, double beta_start, double beta_max,
+static void sparse_swap_loop(SS *S, Tabu *tb, long *out, int *moved, long nsteps, double beta_start, double beta_max,
                              double *E_io, double *best_io, int *best_pos, double *late_io, int *late_pos,
                              uint64_t seed, double lambda) {
     const int n = S->n, q = S->q;
@@ -344,10 +347,10 @@ static void sparse_swap_loop(SS *S, Tabu *tb, int *out, int *moved, long nsteps,
             for (int k = 0; k < q; k++) Fw[k] += S->val[e] * (Ba[k] - Bb[k]);
             ss_touch(S, w);
         }
-        const int cnt = tabu_expire(tb, q, step, out);
-        for (int i = 0; i < cnt; i++) { S->pen[out[i]] = 0.0; ss_touch(S, out[i]); }
-        S->pen[r] = tabu_push(tb, r, b, step) ? lambda / beta : 0.0;
-        S->pen[s] = tabu_push(tb, s, a, step) ? lambda / beta : 0.0;
+        const int cnt = tabu_expire(tb, step, out);
+        for (int i = 0; i < cnt; i++) { S->tab[out[i]] = 0.0; ss_touch(S, (int)(out[i] / q)); }
+        if (tabu_push(tb, r, a, step)) S->tab[(long)r * q + a] = lambda / beta;   // r left a, s left b
+        if (tabu_push(tb, s, b, step)) S->tab[(long)s * q + b] = lambda / beta;
         for (int i = 0; i < S->nlist; i++) S->Fcur[S->list[i]] = S->F[(long)S->list[i] * q + S->x[S->list[i]]];
         for (int i = 0; i < S->nlist; i++) ss_var(S, S->list[i]);
         for (int i = 0; i < S->nlist; i++) ss_pairs(S, S->list[i]);
@@ -372,7 +375,7 @@ void pfa_anneal_sparse_swap(const int64_t *ptr, const int *idx, const double *va
     S.pos = pos; S.F = F;
     S.start = calloc(q + 1, sizeof(int)); S.count = calloc(q, sizeof(int));
     S.at = malloc(sizeof(int) * n); S.x = malloc(sizeof(int) * n);
-    S.Fcur = malloc(sizeof(double) * n); S.pen = calloc(n, sizeof(double));
+    S.Fcur = malloc(sizeof(double) * n); S.tab = calloc((long)n * q, sizeof(double));
     S.kappa = malloc(sizeof(double) * (long)q * q);
     S.mark = calloc(n, sizeof(int)); S.list = malloc(sizeof(int) * n);
     S.nmark = calloc(n, sizeof(int)); S.scratch = malloc(sizeof(double) * n);
@@ -404,12 +407,12 @@ void pfa_anneal_sparse_swap(const int64_t *ptr, const int *idx, const double *va
     ss_rebuild(&S, beta_start);
     Tabu tb;
     tabu_new(&tb, n, q, tenure);
-    int *out = malloc(sizeof(int) * (n + 1)), *moved = malloc(sizeof(int) * (n + 2));
+    long *out = malloc(sizeof(long) * (q + 1)); int *moved = malloc(sizeof(int) * (n + 2));
     sparse_swap_loop(&S, &tb, out, moved, nsteps, beta_start, beta_max, E_io, best_io, best_pos, late_io, late_pos,
                      seed, lambda);
     tabu_free(&tb);
     tree_free(&S.L); tree_free(&S.K); tree_free(&S.C);
-    free(S.start); free(S.count); free(S.at); free(S.x); free(S.Fcur); free(S.pen); free(S.kappa); free(S.mark);
+    free(S.start); free(S.count); free(S.at); free(S.x); free(S.Fcur); free(S.tab); free(S.kappa); free(S.mark);
     free(S.list); free(S.nmark); free(S.scratch); free(S.ba); free(S.bb); free(S.fac); free(S.S); free(S.bmark);
     free(S.blist); free(S.x0c); free(S.fterm); free(S.fblk); free(S.pmark); free(out); free(moved);
 }

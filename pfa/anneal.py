@@ -225,8 +225,9 @@ def run(
     among all pairs at different values by the same rule, so the counts never
     change: k of n (counts (n - k, k)), balanced partitions (equal counts),
     permutations (counts all 1: quadratic assignment, tours by position).
-    The tabu holds a variable for tabu_tenure times the mean number of steps
-    between two moves of a variable at its value.
+    The tabu holds a variable's return to the value it left, for tabu_tenure
+    times the mean number of steps between two moves of a variable at that
+    value.
 
     Parameters:
         couplings (np.ndarray or scipy.sparse matrix): The couplings matrix for the system, such that couplings[i,j] is the coupling between spin_i and spin_j.
@@ -292,8 +293,8 @@ def run(
         raise ValueError("num_reps must be positive")
     if tabu_lambda < 0.0:
         raise ValueError("tabu_lambda must be non-negative")
-    if not 0.0 <= tabu_tenure <= 1.0:
-        raise ValueError("tabu_tenure must be between 0 and 1")
+    if tabu_tenure < 0.0:
+        raise ValueError("tabu_tenure must be non-negative")
     if counts is not None:
         fields = np.zeros((n, q)) if fields is None else np.ascontiguousarray(fields, dtype=np.float64)
         return _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, seed, tabu_lambda,
@@ -370,11 +371,16 @@ def _folded(fold, states):
     variables that one of them has lower (fold(a, b) does that for a from b and returns the energy change), going
     round until its energy no longer falls: its energy and the state."""
     energy, state = min(states, key=lambda pair: pair[0])
-    others = [other for _, other in states if other is not state]
+    return _fold_into(fold, energy, state, [other for _, other in states if other is not state]), state
+
+
+def _fold_into(fold, energy, state, others):
+    """The energy of state after it has taken from the others, in place, every cluster one of them has lower (by more
+    than the rounding of the cluster's sum: the fold's rule), going round until its energy no longer falls."""
     while True:
         lower = energy + sum(fold(state, other) for other in others)
         if not lower < energy:
-            return energy, state
+            return energy
         energy = lower
 
 
@@ -782,19 +788,20 @@ def _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, s
 def _reannealed(anneal, fold, steps_for, energy, x, states):
     """x after the variables on which it differs from each of the states have been annealed again from random values,
     the agreeing variables fixed, for steps_for(S) steps: in proportion to the moves of the differing variables S.
-    What the anneal finds folds into x, and when that lowers x the two states of the anneal join the states to go
-    round again, until no anneal brings anything. (On dense couplings the differing variables form one cluster, which
-    the fold cannot take.)"""
+    What the anneal finds folds into x (by the fold's rule, so that a state the anneal reports a rounding lower is
+    not a gain), and when that lowers x the two states of the anneal join the states to go round again, until no
+    anneal brings anything. (On dense couplings the differing variables form one cluster, which the fold cannot
+    take.)"""
     pool = [y for _, y in states if y is not x]
     while pool:
         S = np.flatnonzero(x != pool.pop())
         if len(S) == 0 or len(S) == len(x):   # nothing differs, or nothing is shared
             continue
-        found = anneal(S, x, energy, 0.0, steps_for(S))
-        lower, x_new = _folded(fold, [(energy, x)] + found)
+        found = [y for _, y in anneal(S, x, energy, 0.0, steps_for(S))]
+        lower = _fold_into(fold, energy, x, found)
         if lower < energy:
-            pool.extend(y for _, y in found if y is not x_new)
-            energy, x = lower, x_new
+            pool.extend(found)
+            energy = lower
     return energy, x
 
 

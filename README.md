@@ -179,9 +179,12 @@ pairs at different values by the same rule, and changes the energy by
 ```
 
 the two single moves plus a correction for the pair's own term, which both F's count with the old values. The counts
-never change, so there is no penalty to hold them and no barrier between feasible states. The tabu holds both
-variables, each for `tabu_tenure` times the mean number of steps between two moves of a variable at its new value
-(the pairs divided by the positions of the other values: n/8 steps in a permutation, k/4 for the k chosen of n).
+never change, so there is no penalty to hold them and no barrier between feasible states. The tabu is on the value a
+variable has left, not on the variable: after the exchange, r's moves to a and s's moves to b are raised by λ/β, each
+for `tabu_tenure` times the mean number of steps between two moves of a variable at that value (the pairs divided by
+the positions of the other values: n/2 steps in a permutation). A pair's penalty is the sum of its two reassignments'.
+The two variables stay free to move elsewhere, so a long tenure does not freeze the state, it forbids the way back:
+the walk between low states cannot retrace itself and has to go on.
 Recombination needs clusters that keep the counts: besides the pairs with I_rs ≠ 0, the differing variables are
 joined along the cycles of their exchanges, the arcs a_r → b_r on the values, where every value has as many arcs in
 as out. Every cluster then moves as many variables into each value as out of it, and taking it keeps the counts. For a
@@ -448,17 +451,20 @@ the spin kernel selects among spins.
 
   The second is Taillard's update for quadratic assignment and holds for any symmetric B. The pairs of t and of u
   themselves are recomputed from F, O(1) each from the two columns F(a) and F(b) collected during the update of F.
-- **One pass.** The update of D is applied in the next step's pass, which scores every pair −ΔE − c_x − c_y + g/β in
-  float32 and selects as the spin pass does, with pairs in place of spins: D read and written (16 bytes), one noise
-  value (4 bytes) and, from cache, the α, β and tabu penalty of the column. One noise value per pair, a vector of the
+- **One pass.** The update of D is applied in the next step's pass, which scores every pair −ΔE − c_x(b) − c_y(a) + g/β
+  in float32 and selects as the spin pass does, with pairs in place of spins: D read and written (16 bytes), one noise
+  value (4 bytes) and, from cache, the α, β and two tabu penalties of the column. One noise value per pair, a vector of the
   number of pairs stored twice. Rows are padded to multiples of 64 pairs with +∞, so a chunk never straddles two rows
   and the rescore of the winning chunk works as for spins. The recomputed pairs are stored with the update that pass
   will subtract added back; that is one rounding, and every pair is recomputed whenever one of its positions moves,
   so errors do not build up.
 - **Cost.** Per step, one pass over the pairs and one rank-1 update of F, nq multiply-adds. Memory: 8 bytes per pair
-  for D, 4 for its noise, 8nq for F, and the user's A and B.
-- **Tabu.** The penalty of a variable is a float per position, read per row and per column of the pass. Each value
-  keeps a queue of the variables that moved to it, with the step; the ones whose tenure is over leave at the front.
+  for D, 4 for its noise, 8nq for F, 4n(n + q) for the tabu penalties, and the user's A and B.
+- **Tabu.** The pair of positions (t, u) moves pos[t] to val[u] and pos[u] to val[t], so the penalties of a row are two
+  vectors over its columns u: R[pos[t]][u], the row's variable at the column's value, and C[val[t]][u], the column's
+  variable at the row's value, floats by position (n rows of R, q of C). A penalty set or expired writes the positions
+  of its value in R and one entry of C; an exchange rewrites the two columns of C. Each value keeps a queue of the
+  variables that left it, with the step; the ones whose tenure is over leave at the front, unless renewed since.
 - **Recombination.** `pfa_fold_swap` joins the differing variables along the cycles of their exchanges before summing
   the clusters: a walk over the unused arcs from any value closes a cycle whenever it returns to a value it has
   visited, and can only end where it started.
@@ -519,7 +525,7 @@ each variable (int64). Its parameters:
 | `num_reps` | repetitions of the anneal, R | `1` | The first starts from a random value for every variable; each later one restarts from the best state so far with β rising from u/(R−1)·`beta_max`, u being 1 plus the number of restarts so far that did not lower the best energy (see Repetitions). After each repetition the best state takes the clusters of variables that the repetition has lower, and the variables that still differ are annealed again (see Recombination). |
 | `seed` | random seed | `42` | Sets the first repetition's state and every repetition's Gumbel noise vector and offsets, or on the sparse kernels its draws, so results are reproducible. |
 | `tabu_lambda` | the tabu penalty λ, in temperatures | `3.0` | Divides the weight of a variable's moves by e^λ just after it moved (see Tabu). Rarely worth changing. |
-| `tabu_tenure` | the tabu tenure, as a fraction of the number of variables V | `0.25` | A variable stays tabu for `tabu_tenure` · V steps, with `counts` for `tabu_tenure` times the mean number of steps between two moves of a variable at its value; 0 turns the tabu off. Rarely worth changing. |
+| `tabu_tenure` | the tabu tenure, as a fraction of the number of variables V | `0.25` | A variable stays tabu for `tabu_tenure` · V steps; with `counts`, its return to the value it left is tabu for `tabu_tenure` times the mean number of steps between two moves of a variable at that value. 0 turns the tabu off. Rarely worth changing. |
 
 A problem in one-hot form, ½ xᵀ C x + fᵀ x over binary x with one 1 per group, converts with
 `pfa.from_one_hot(couplings, fields, groups)`, with `groups[i]` the variable that x_i belongs to. It returns the
