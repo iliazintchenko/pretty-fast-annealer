@@ -184,7 +184,9 @@ variable has left, not on the variable: after the exchange, r's moves to a and s
 for `tabu_tenure` times the mean number of steps between two moves of a variable at that value (the pairs divided by
 the positions of the other values: n/2 steps in a permutation). A pair's penalty is the sum of its two reassignments'.
 The two variables stay free to move elsewhere, so a long tenure does not freeze the state, it forbids the way back:
-the walk between low states cannot retrace itself and has to go on.
+the walk between low states cannot retrace itself and has to go on. Against the tabu on the variable, at five minutes
+on quadratic assignment, the random instances closed two thirds of their distance to the best known values and the
+structured ones a third to two thirds; the grid instances stayed where they were.
 Recombination needs clusters that keep the counts: besides the pairs with I_rs ≠ 0, the differing variables are
 joined along the cycles of their exchanges, the arcs a_r → b_r on the values, where every value has as many arcs in
 as out. Every cluster then moves as many variables into each value as out of it, and taking it keeps the counts. For a
