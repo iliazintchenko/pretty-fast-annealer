@@ -85,7 +85,10 @@ few variables back and forth.
 λ is in units of the temperature and the tenure a fraction of V, so the rule is unchanged when the energy is rescaled
 (f, T, β → αf, αT, β/α) or V grows. Both constants are tuned on benchmarks, not derived, and set by `tabu_lambda` and
 `tabu_tenure`. The tabu breaks detailed balance, which an optimizer doesn't need. With it, the best `beta_max` is
-roughly twice what it is without.
+roughly twice what it is without, and the re-annealing and the tabu on the value left moved it colder again on
+structured problems: the best end of cooling changes with every change to the walk and has to be measured again, and
+it differs between problem classes at the same scale of ΔE (on quadratic assignment, by four times between random
+and grid instances).
 
 **Repetitions.** Repetition 1 of R starts from a random value for every variable at β = 0. Each later one, a restart,
 starts from the best state so far, with new random numbers and β starting partway up the ramp:
@@ -167,6 +170,11 @@ cut the distance to the best known values by three to five times at equal time o
 share many assignments (distances on a grid, structured flows), and left the random instances, whose low states share
 almost nothing, within the spread between seeds. On spin glasses, dense or sparse, the results stayed within the
 spread between seeds at equal steps, the re-anneals adding up to 40% to the time on the dense ones.
+
+Both recombinations need the states in one frame. When the couplings have a symmetry (the reflections and rotations
+of a grid of locations), independent anneals land in different images of the same optimum, share no variables, and
+the fold and the re-anneal take nothing from each other; `run()` does not align them. Restarts from the best state
+stay in its frame when the reheat is mild and leave it when it is not.
 
 **Exchanges.** With `counts`, the number of variables at each value is fixed: k of n items chosen, a graph cut into
 parts of given sizes, a permutation with one variable per value. The couplings factor, T_rs(a, b) = A_rs B(a, b),
