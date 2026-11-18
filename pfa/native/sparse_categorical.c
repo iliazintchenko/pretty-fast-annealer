@@ -25,8 +25,9 @@ static inline void sparse_cat_values(Sums *sums, const double *F, const float *S
 static void sparse_cat_loop(const int *first, const int *vptr, const int *adj, const int64_t *rows,
                             const double *vals, double *F, int m, int V, int *cur, long nmoves, double beta_start,
                             double beta_max, double *E_io, double *best_io, int *best_cur, double *late_io,
-                            int *late_cur, uint64_t seed, double lambda, int tenure, double *pen, long *last,
-                            int *recent, int *moved, float *S, const int *grp, const long *len, Sums *sums) {
+                            int *late_cur, double *marks, uint64_t seed, double lambda, int tenure, double *pen,
+                            long *last, int *recent, int *moved, float *S, const int *grp, const long *len,
+                            Sums *sums) {
     double E = *E_io, best = *best_io, beta = beta_start, dbeta = (beta_max - beta_start) / (double)(nmoves - 1);
     uint64_t rng = seed | 1;
     int at_best = 0;     // the current state is the best one of this half and best_cur does not hold it yet
@@ -40,7 +41,9 @@ static void sparse_cat_loop(const int *first, const int *vptr, const int *adj, c
         sums->x[k] = (first[r + 1] - first[r] == 1 ? 0.0 : c >= 0 ? F[c] : 0.0) + (double)S[k] * F[k];
     }
     for (long t = 0; t < nmoves; t++) {
+        if (t == 3 * nmoves / 4) marks[1] = best;   // the half's lowest at three quarters
         if (t == nmoves / 2) {   // the second half starts: its lowest state so far is the current one
+            marks[0] = E;   // the energy at the half
             if (at_best) KEEP_BEST
             *best_io = best; best = E; best_cur = late_cur;
             __builtin_memcpy(best_cur, cur, sizeof(int) * V); nmoved = 0;
@@ -93,7 +96,8 @@ static void sparse_cat_loop(const int *first, const int *vptr, const int *adj, c
 void pfa_anneal_sparse_categorical(const int *first, const int *vptr, const int *adj, const int64_t *rows,
                                    const double *vals, double *F, int m, int V, int *cur, long nmoves,
                                    double beta_start, double beta_max, double *E_io, double *best_io, int *best_cur,
-                                   double *late_io, int *late_cur, uint64_t seed, double lambda, int tenure) {
+                                   double *late_io, int *late_cur, double *marks, uint64_t seed, double lambda,
+                                   int tenure) {
     double *pen = calloc(V, sizeof(double));
     float *S = malloc(sizeof(float) * m);
     long *last = malloc(sizeof(long) * V), *len = malloc(sizeof(long) * V);
@@ -108,7 +112,8 @@ void pfa_anneal_sparse_categorical(const int *first, const int *vptr, const int 
         if (cur[r] >= 0) S[cur[r]] = first[r + 1] - first[r] == 1 ? 1.0f : 0.0f;
     }
     sparse_cat_loop(first, vptr, adj, rows, vals, F, m, V, cur, nmoves, beta_start, beta_max, E_io, best_io, best_cur,
-                    late_io, late_cur, seed, lambda, tenure, pen, last, recent, moved, S, grp, len, &sums);
+                    late_io, late_cur, marks, seed, lambda, tenure, pen, last, recent, moved, S, grp, len,
+                    &sums);
     sums_free(&sums);
     free(pen); free(S); free(last); free(len); free(recent); free(moved); free(grp);
 }

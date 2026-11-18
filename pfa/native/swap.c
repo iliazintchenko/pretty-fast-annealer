@@ -209,14 +209,16 @@ static void swap_tabu(Swap *S, Tabu *tb, long *out, int t, int u, long step, dou
 
 ANNEAL_ATTR static void swap_loop(Swap *S, Tabu *tb, long *out, const float *noise, long nsteps, double beta_start,
                                   double beta_max, double *E_io, double *best_io, int *best_pos, double *late_io,
-                                  int *late_pos, uint64_t seed, double lambda) {
+                                  int *late_pos, double *marks, uint64_t seed, double lambda) {
     const int n = S->n;
     const uint64_t P = (uint64_t)S->rs[n];
     double E = *E_io, best = *best_io, beta = beta_start, dbeta = (beta_max - beta_start) / (double)(nsteps - 1);
     uint64_t x = seed | 1;
     int at_best = 0;   // the current state is the best one of this half, not yet in best_pos
     for (long step = 0; step < nsteps; step++) {
+        if (step == 3 * nsteps / 4) marks[1] = best;   // the half's lowest at three quarters
         if (step == nsteps / 2) {   // the second half starts: its lowest state so far is the current one
+            marks[0] = E;   // the energy at the half
             if (at_best) __builtin_memcpy(best_pos, S->pos, sizeof(int) * n);
             *best_io = best; best = E; best_pos = late_pos; at_best = 1;
         }
@@ -246,7 +248,7 @@ ANNEAL_ATTR static void swap_loop(Swap *S, Tabu *tb, long *out, const float *noi
 void pfa_anneal_swap(const double *A, const double *B, int n, int q, const int *val, const int *e, const int64_t *rs,
                      int *pos, double *F, double *D, const float *noise, long nsteps, double beta_start,
                      double beta_max, double *E_io, double *best_io, int *best_pos, double *late_io, int *late_pos,
-                     uint64_t seed, double lambda, const int64_t *tenure) {
+                     double *marks, uint64_t seed, double lambda, const int64_t *tenure) {
     int *start = calloc(q, sizeof(int));   // first position of each value present
     for (int t = n - 1; t >= 0; t--) start[val[t]] = t;
     Swap S = {n, q, A, B, val, e, rs, pos, malloc(sizeof(int) * n), F, D, malloc(sizeof(double) * n),
@@ -262,8 +264,8 @@ void pfa_anneal_swap(const double *A, const double *B, int n, int q, const int *
     Tabu tb;
     tabu_new(&tb, n, q, tenure);
     long *out = malloc(sizeof(long) * (q + 1));   // the (variable, value) leaving the tabu at a step: one per value
-    swap_loop(&S, &tb, out, noise, nsteps, beta_start, beta_max, E_io, best_io, best_pos, late_io, late_pos, seed,
-              lambda);
+    swap_loop(&S, &tb, out, noise, nsteps, beta_start, beta_max, E_io, best_io, best_pos, late_io, late_pos, marks,
+              seed, lambda);
     free(S.at); free(S.Fcur); free(S.kappa); free(S.alpha); free(S.beta); free(S.ap); free(S.bp); free(S.Fa);
     free(S.Fb); free(start); free(S.R); free(S.C); free(out);
     tabu_free(&tb);

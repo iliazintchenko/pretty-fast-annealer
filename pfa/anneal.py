@@ -29,6 +29,7 @@ _lib.pfa_anneal_spin.argtypes = [
     _f32,  # spins of that state (in: initial)
     ctypes.POINTER(ctypes.c_double),  # lowest energy of the second half (out)
     _f32,  # spins of that state (out)
+    _f64,  # the energy at the half and the second half's lowest at three quarters (out)
     ctypes.c_uint64,  # seed for the per-step noise offsets
     ctypes.c_double,  # tabu penalty lambda, in temperatures
     ctypes.c_int,  # tabu tenure, in flips
@@ -50,6 +51,7 @@ _lib.pfa_anneal_categorical.argtypes = [
     _i32,  # rows of that state (in: initial)
     ctypes.POINTER(ctypes.c_double),  # lowest energy of the second half (out)
     _i32,  # rows of that state (out)
+    _f64,  # the energy at the half and the second half's lowest at three quarters (out)
     ctypes.c_uint64,  # seed for the per-step noise offsets
     ctypes.c_double,  # tabu penalty lambda, in temperatures
     ctypes.c_int,  # tabu tenure, in moves
@@ -113,6 +115,7 @@ _lib.pfa_anneal_swap.argtypes = [
     _i32,  # positions of that state (in: initial)
     ctypes.POINTER(ctypes.c_double),  # lowest energy of the second half (out)
     _i32,  # positions of that state (out)
+    _f64,  # the energy at the half and the second half's lowest at three quarters (out)
     ctypes.c_uint64,  # seed for the per-step noise offsets
     ctypes.c_double,  # tabu penalty lambda, in temperatures
     _i64,  # tabu tenure of each value, in steps
@@ -178,18 +181,24 @@ def run(
     with sizes the energy of a categorical problem (below), with PFA, a
     rejection-free annealer (see the README): every step flips one spin,
     chosen with probability proportional to exp(-beta * dE) by Gumbel-max
-    sampling, while beta rises linearly to beta_max. For the tabu_tenure * n
-    flips after a spin flips, its dE is raised by tabu_lambda temperatures at
-    the time of its flip (a tabu). The first repetition starts from random
-    spins at beta = 0; each later one restarts from the best state so far,
-    with beta ramping up from u / (num_reps - 1) * beta_max, u being 1 plus
-    the number of restarts so far that did not lower the best energy, so
-    the restarts cool as they stop paying. After each repetition
-    the best state takes from the repetition's lowest states (one per half
-    of its flips) every cluster of spins that they have lower: the spins on
-    which two states differ fall into clusters not coupled to each other,
-    and each cluster is taken from the state where it costs less. Compiled
-    to native code on one core.
+    sampling, while beta rises linearly to the end of cooling, beta_max in
+    the first repetition. For the tabu_tenure * n flips after a spin flips,
+    its dE is raised by tabu_lambda temperatures at the time of its flip (a
+    tabu). The first repetition starts from random spins at beta = 0; each
+    later one restarts from the best state so far, with beta ramping up from
+    u / (num_reps - 1) of its end, u being the number of restarts so far
+    that did not lower the best energy, so the restarts cool as they stop
+    paying. The end of cooling moves between repetitions: an anneal
+    whose last quarter still gained more than a tenth of what its third
+    quarter gained was still improving when it stopped, and the end of
+    cooling is found between such an end and twice it, the repetitions
+    alternating between the two and the pair moving towards the end whose
+    restarts gain more (see the README). After each repetition the best
+    state takes from the repetition's lowest states (one per half of its
+    flips) every cluster of spins that they have lower: the spins on which
+    two states differ fall into clusters not coupled to each other, and each
+    cluster is taken from the state where it costs less. Compiled to native
+    code on one core.
 
     The couplings are an array or a scipy.sparse matrix; the format does not
     change the run. run() picks the kernel from the number of nonzero
@@ -235,9 +244,9 @@ def run(
         sizes (np.ndarray, optional): For categorical problems, the number of values of each variable. Defaults to None.
         counts (np.ndarray, optional): For variables that exchange values, the number of variables at each value. Defaults to None.
         table (np.ndarray, optional): With counts, the q x q symmetric table between the values. Defaults to None.
-        beta_max (float): The maximum inverse temperature. Defaults to 1.0.
+        beta_max (float): The end of cooling of the first repetition, in 1/energy; the later ones find their own. Defaults to 1.0.
         num_steps (int): Steps per repetition, each flipping a spin or changing one variable's value. Defaults to 1000.
-        num_reps (int): Number of repetitions: the first from random spins, each further one from the best state so far, which takes the parts each repetition has lower. Defaults to 1.
+        num_reps (int): Number of repetitions: the first from random spins, each further one from the best state so far, which takes the parts each repetition has lower; the end of cooling moves between them. Defaults to 1.
         seed (int): Seed for the random number generator
         tabu_lambda (float): Tabu penalty on a just-flipped spin, in temperatures. Defaults to 3.0;
             rarely worth changing.
@@ -384,6 +393,61 @@ def _fold_into(fold, energy, state, others):
         energy = lower
 
 
+def _improving(marks, late):
+    """Whether an anneal was still improving when it stopped: its last quarter lowered the second half's lowest state
+    (from marks[1], the lowest at three quarters, to late) by more than a tenth of what the third quarter did (from
+    marks[0], the energy at the half). A ratio, so the same test at every size and energy scale."""
+    return marks[1] - late > 0.1 * (marks[0] - marks[1])
+
+
+def _repeat(anneal_at, fold, steps_for, everything, beta_max, num_steps, num_reps):
+    """The repetitions: the first from random values, each later one a restart from the best state so far, the lowest
+    states of each folded into the best state and the variables that still differ annealed again. anneal_at(end)
+    gives the anneal(S, x0, energy0, beta_start, steps) whose cooling ends at end, returning the states and whether it
+    was still improving at the end. Returns the best state.
+
+    The end of cooling moves between repetitions. Hotter by a factor two after an anneal that had frozen before its
+    end, until an anneal is seen still improving: that end is the colder one of a pair, the other twice it, and the
+    repetitions alternate between the two. Once both have been run as restarts, the pair moves one factor towards
+    the end whose restarts gained more; when that direction reverses, the best end lies within the pair, which
+    narrows (the factor to its square root) around the winner. An anneal still improving at the colder end moves
+    the pair colder before the gains have spoken."""
+    end, cold = beta_max, None     # the end of the next repetition; the colder end of the pair (None: no pair yet)
+    f, last_dir = 2.0, 0           # the factor between the ends of the pair; the direction of the pair's last move
+    gains = {}                     # per end of the pair, the gains of the restarts run at it since the pair last moved
+    stale = 0   # the restarts so far that did not lower the best energy: the first restart reheats to beta = 0
+    for rep in range(num_reps):
+        anneal = anneal_at(end)
+        if rep == 0:
+            states, improving = anneal(everything, None, None, 0.0, num_steps)
+        else:
+            states, improving = anneal(everything, x_best, energy, end * stale / (num_reps - 1), num_steps)
+            states.append((energy, x_best))
+        energy_new, x_best = _folded(fold, states)
+        energy_new, x_best = _reannealed(anneal, fold, steps_for, energy_new, x_best, states)
+        if rep > 0 and cold is not None and end in (cold, cold * f):
+            gains.setdefault(end, []).append(energy - energy_new)
+        stale += rep > 0 and not energy_new < energy
+        energy = energy_new
+        if cold is None:
+            cold, end = (end, end * f) if improving else (None, end / f)
+        elif gains.get(cold) and gains.get(cold * f) and np.mean(gains[cold]) != np.mean(gains[cold * f]):
+            colder = np.mean(gains[cold * f]) > np.mean(gains[cold])
+            if last_dir and colder != (last_dir > 0):   # a reversal: the best end lies within the pair
+                winner, f = cold * f if colder else cold, f ** 0.5
+                cold = winner / f ** 0.5
+            else:
+                cold = cold * f if colder else cold / f
+            last_dir, end = 1 if colder else -1, cold
+            gains.clear()
+        elif improving and end == cold * f:
+            cold = end
+            gains.clear()
+        else:
+            end = cold * f if end == cold else cold
+    return x_best
+
+
 def _run_spins(couplings, fields, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure):
     """run() for spins, on validated input, with the couplings as _spin_form() returns them."""
     n = len(fields)
@@ -394,29 +458,17 @@ def _run_spins(couplings, fields, beta_max, num_steps, num_reps, seed, tabu_lamb
     else:
         fold = lambda a, b: _lib.pfa_fold_spin(couplings, fields, n, a, b)
     rng = np.random.default_rng(seed)
-    anneal = lambda S, s0, energy0, beta_start, steps: _anneal_spins(couplings, fields, S, s0, energy0, beta_start,
-                                                                      beta_max, steps, rng, tabu_lambda, tabu_tenure)
-    steps_for = lambda S: max(1, num_steps * len(S) // n)
-    everything = np.arange(n)
-    stale = 0   # 1 after the first repetition, plus the restarts so far that did not lower the best energy
-    for rep in range(num_reps):
-        if rep == 0:
-            states = anneal(everything, None, None, 0.0, num_steps)
-        else:
-            states = anneal(everything, spins_best, energy, beta_max * stale / (num_reps - 1), num_steps)
-            states.append((energy, spins_best))
-        energy_new, spins_best = _folded(fold, states)
-        energy_new, spins_best = _reannealed(anneal, fold, steps_for, energy_new, spins_best, states)
-        stale += rep == 0 or not energy_new < energy
-        energy = energy_new
-    return spins_best.astype(np.int8)
+    anneal_at = lambda end: (lambda S, s0, energy0, beta_start, steps: _anneal_spins(
+        couplings, fields, S, s0, energy0, beta_start, end, steps, rng, tabu_lambda, tabu_tenure))
+    steps_for = lambda S, x: max(1, num_steps * len(S) // n)
+    return _repeat(anneal_at, fold, steps_for, np.arange(n), beta_max, num_steps, num_reps).astype(np.int8)
 
 
 def _anneal_spins(couplings, fields, S, s0, energy0, beta_start, beta_max, num_steps, rng, tabu_lambda, tabu_tenure):
     """One anneal of the spins S, the others fixed as in s0 and their couplings folded into the fields, from s0 on S
     (random spins when s0 is None) with energy0 the energy of s0: the lowest state of the first half of the steps and
-    the lowest of the second half, as (energy, state) pairs over all the spins. couplings as _spin_form() returns
-    them; the sub-problem's kernel is chosen again."""
+    the lowest of the second half, as (energy, state) pairs over all the spins, and whether the walk was still
+    improving at the end. couplings as _spin_form() returns them; the sub-problem's kernel is chosen again."""
     n, m = len(fields), len(S)
     if m < n:
         T = np.setdiff1d(np.arange(n), S, assume_unique=True)
@@ -454,10 +506,11 @@ def _anneal_spins(couplings, fields, S, s0, energy0, beta_start, beta_max, num_s
     energy_c = ctypes.c_double(energy)
     first_c, late_c = ctypes.c_double(energy), ctypes.c_double()
     lowest = ctypes.byref(first_c), spins_first, ctypes.byref(late_c), spins_late
+    marks = np.empty(2)   # the energy at the half and the second half's lowest at three quarters
     if sparse:
         _lib.pfa_anneal_sparse_spin(
             *stored, half_fields, spins_f32, m, num_steps, beta_start, beta_max, ctypes.byref(energy_c),
-            *lowest, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
+            *lowest, marks, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
         )
     else:
         noise_vec = -np.log(-np.log(rng.random(m)))
@@ -467,14 +520,14 @@ def _anneal_spins(couplings, fields, S, s0, energy0, beta_start, beta_max, num_s
         first = int(np.argmax(4.0 * beta_start * spins * half_fields + noise_vec))
         _lib.pfa_anneal_spin(
             couplings, half_fields, spins_f32, noise_buffer, m, num_steps, beta_start, beta_max, first,
-            ctypes.byref(energy_c), *lowest, offsets_seed, tabu_lambda, tenure,
+            ctypes.byref(energy_c), *lowest, marks, offsets_seed, tabu_lambda, tenure,
         )
     states = []
     for value, part in ((first_c.value, spins_first), (late_c.value, spins_late)):
         s = s0.copy() if s0 is not None else np.empty(n, dtype=np.float32)
         s[S] = part
         states.append((value + offset, s))
-    return states
+    return states, _improving(marks, late_c.value)
 
 
 def _run_categorical(couplings, fields, sizes, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure):
@@ -650,22 +703,10 @@ def _anneal_categorical(form, fields, beta_max, num_steps, num_reps, seed, tabu_
     rng = np.random.default_rng(seed)
     fields = np.ascontiguousarray(fields, dtype=np.float64)
     fold = lambda a, b: _lib.pfa_fold_categorical(*form.lines, fields, a, b)
-    anneal = lambda S, cur0, energy0, beta_start, steps: _anneal_cat(form, fields, S, cur0, energy0, beta_start,
-                                                                     beta_max, steps, rng, tabu_lambda, tabu_tenure)
-    steps_for = lambda S: max(1, num_steps * len(S) // V)
-    everything = np.arange(V)
-    stale = 0   # 1 after the first repetition, plus the restarts so far that did not lower the best energy
-    for rep in range(num_reps):
-        if rep == 0:
-            states = anneal(everything, None, None, 0.0, num_steps)
-        else:
-            states = anneal(everything, cur_best, energy, beta_max * stale / (num_reps - 1), num_steps)
-            states.append((energy, cur_best))
-        energy_new, cur_best = _folded(fold, states)
-        energy_new, cur_best = _reannealed(anneal, fold, steps_for, energy_new, cur_best, states)
-        stale += rep == 0 or not energy_new < energy
-        energy = energy_new
-    return values(cur_best)
+    anneal_at = lambda end: (lambda S, cur0, energy0, beta_start, steps: _anneal_cat(
+        form, fields, S, cur0, energy0, beta_start, end, steps, rng, tabu_lambda, tabu_tenure))
+    steps_for = lambda S, x: max(1, num_steps * len(S) // V)
+    return values(_repeat(anneal_at, fold, steps_for, np.arange(V), beta_max, num_steps, num_reps))
 
 
 def _anneal_cat(form, fields, S, cur0, energy0, beta_start, beta_max, num_steps, rng, tabu_lambda, tabu_tenure):
@@ -725,17 +766,18 @@ def _anneal_cat(form, fields, S, cur0, energy0, beta_start, beta_max, num_steps,
     energy_c = ctypes.c_double(energy)
     first_c, late_c = ctypes.c_double(energy), ctypes.c_double()
     lowest = ctypes.byref(first_c), cur_first, ctypes.byref(late_c), cur_late
+    marks = np.empty(2)   # the energy at the half and the second half's lowest at three quarters
     if sparse:
         _lib.pfa_anneal_sparse_categorical(
             *stored, F, m, V, cur, num_steps, beta_start, beta_max, ctypes.byref(energy_c), *lowest,
-            int(rng.integers(1, 2**63)), tabu_lambda, tenure,
+            marks, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
         )
     else:
         noise_vec = -np.log(-np.log(rng.random(m)))
         noise_buffer = np.concatenate((noise_vec, noise_vec)).astype(np.float32)
         _lib.pfa_anneal_categorical(
             couplings, F, m, V, grp, cur, noise_buffer, num_steps, beta_start, beta_max, ctypes.byref(energy_c),
-            *lowest, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
+            *lowest, marks, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
         )
     states = []
     for value, found in ((first_c.value, cur_first), (late_c.value, cur_late)):
@@ -745,7 +787,7 @@ def _anneal_cat(form, fields, S, cur0, energy0, beta_start, beta_max, num_steps,
         else:
             whole = found
         states.append((value + offset, whole))
-    return states
+    return states, _improving(marks, late_c.value)
 
 
 def _sparse_swap_is_faster(d, n, q, pairs):
@@ -765,29 +807,17 @@ def _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, s
     A_fold = _array(A, n)                                        # the fold reads the array
     fold = lambda a, b: _lib.pfa_fold_swap(A_fold, table, fields, n, len(counts), a, b)
     rng = np.random.default_rng(seed)
-    anneal = lambda S, x0, energy0, beta_start, steps: _anneal_swap(A, table, fields, counts, S, x0, energy0,
-                                                                     beta_start, beta_max, steps, rng, tabu_lambda,
-                                                                     tabu_tenure)
+    anneal_at = lambda end: (lambda S, x0, energy0, beta_start, steps: _anneal_swap(
+        A, table, fields, counts, S, x0, energy0, beta_start, end, steps, rng, tabu_lambda, tabu_tenure))
     pairs = _pairs(counts)
-    everything = np.arange(n)
-    stale = 0   # 1 after the first repetition, plus the restarts so far that did not lower the best energy
-    for rep in range(num_reps):
-        if rep == 0:
-            states = anneal(everything, None, None, 0.0, num_steps)
-        else:
-            states = anneal(everything, x_best, energy, beta_max * stale / (num_reps - 1), num_steps)
-            states.append((energy, x_best))
-        energy_new, x_best = _folded(fold, states)
-        steps_for = lambda S: max(1, num_steps * _pairs(np.bincount(x_best[S], minlength=len(counts))) // pairs)
-        energy_new, x_best = _reannealed(anneal, fold, steps_for, energy_new, x_best, states)
-        stale += rep == 0 or not energy_new < energy
-        energy = energy_new
-    return x_best.astype(np.int64)
+    # the steps of a re-anneal: in proportion to the pairs of S at different values, read from the state annealed
+    steps_for = lambda S, x: max(1, num_steps * _pairs(np.bincount(x[S], minlength=len(counts))) // pairs)
+    return _repeat(anneal_at, fold, steps_for, np.arange(n), beta_max, num_steps, num_reps).astype(np.int64)
 
 
 def _reannealed(anneal, fold, steps_for, energy, x, states):
     """x after the variables on which it differs from each of the states have been annealed again from random values,
-    the agreeing variables fixed, for steps_for(S) steps: in proportion to the moves of the differing variables S.
+    the agreeing variables fixed, for steps_for(S, x) steps: in proportion to the moves of the differing variables S.
     What the anneal finds folds into x (by the fold's rule, so that a state the anneal reports a rounding lower is
     not a gain), and when that lowers x the two states of the anneal join the states to go round again, until no
     anneal brings anything. (On dense couplings the differing variables form one cluster, which the fold cannot
@@ -797,7 +827,7 @@ def _reannealed(anneal, fold, steps_for, energy, x, states):
         S = np.flatnonzero(x != pool.pop())
         if len(S) == 0 or len(S) == len(x):   # nothing differs, or nothing is shared
             continue
-        found = [y for _, y in anneal(S, x, energy, 0.0, steps_for(S))]
+        found = [y for _, y in anneal(S, x, energy, 0.0, steps_for(S, x))[0]]
         lower = _fold_into(fold, energy, x, found)
         if lower < energy:
             pool.extend(found)
@@ -869,10 +899,11 @@ def _anneal_swap(A, table, fields, counts, S, x0, energy0, beta_start, beta_max,
     energy_c = ctypes.c_double(energy)
     first_c, late_c = ctypes.c_double(energy), ctypes.c_double()
     lowest = ctypes.byref(first_c), pos_first, ctypes.byref(late_c), pos_late
+    marks = np.empty(2)   # the energy at the half and the second half's lowest at three quarters
     if sparse:
         _lib.pfa_anneal_sparse_swap(
             *stored, table, m, q, val, pos, F, num_steps, beta_start, beta_max, ctypes.byref(energy_c), *lowest,
-            int(rng.integers(1, 2**63)), tabu_lambda, tenure,
+            marks, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
         )
     else:
         D = np.empty(P)
@@ -880,14 +911,14 @@ def _anneal_swap(A, table, fields, counts, S, x0, energy0, beta_start, beta_max,
         noise_buffer = np.concatenate((noise_vec, noise_vec)).astype(np.float32)
         _lib.pfa_anneal_swap(
             A_S, table, m, q, val, e, rs, pos, F, D, noise_buffer, num_steps, beta_start, beta_max,
-            ctypes.byref(energy_c), *lowest, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
+            ctypes.byref(energy_c), *lowest, marks, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
         )
     states = []
     for value, p in ((first_c.value, pos_first), (late_c.value, pos_late)):
         x = x0.copy() if x0 is not None else np.empty(n, dtype=np.int32)
         x[S[p]] = val
         states.append((value + offset, x))
-    return states
+    return states, _improving(marks, late_c.value)
 
 
 def _one_hot_layout(groups):

@@ -307,7 +307,7 @@ static void ss_draw(SS *S, double beta, uint64_t *rng, int *r_out, int *s_out) {
 
 static void sparse_swap_loop(SS *S, Tabu *tb, long *out, int *moved, long nsteps, double beta_start, double beta_max,
                              double *E_io, double *best_io, int *best_pos, double *late_io, int *late_pos,
-                             uint64_t seed, double lambda) {
+                             double *marks, uint64_t seed, double lambda) {
     const int n = S->n, q = S->q;
     double E = *E_io, best = *best_io, beta = beta_start, dbeta = (beta_max - beta_start) / (double)(nsteps - 1);
     uint64_t rng = seed | 1;
@@ -318,7 +318,9 @@ static void sparse_swap_loop(SS *S, Tabu *tb, long *out, int *moved, long nsteps
         else for (long i = 0; i < nmoved; i++) best_pos[moved[i]] = S->pos[moved[i]]; \
         nmoved = 0; at_best = 0; }
     for (long step = 0; step < nsteps; step++) {
+        if (step == 3 * nsteps / 4) marks[1] = best;   // the half's lowest at three quarters
         if (step == nsteps / 2) {   // the second half starts: its lowest state so far is the current one
+            marks[0] = E;   // the energy at the half
             if (at_best) KEEP_BEST
             *best_io = best; best = E; best_pos = late_pos;
             __builtin_memcpy(best_pos, S->pos, sizeof(int) * n); nmoved = 0;
@@ -368,8 +370,8 @@ static void sparse_swap_loop(SS *S, Tabu *tb, long *out, int *moved, long nsteps
 void pfa_anneal_sparse_swap(const int64_t *ptr, const int *idx, const double *val, const int *pid, int np,
                             const int *pr, const int *ps, const double *B, int n, int q, const int *val_pos, int *pos,
                             double *F, long nsteps, double beta_start, double beta_max, double *E_io, double *best_io,
-                            int *best_pos, double *late_io, int *late_pos, uint64_t seed, double lambda,
-                            const int64_t *tenure) {
+                            int *best_pos, double *late_io, int *late_pos, double *marks, uint64_t seed,
+                            double lambda, const int64_t *tenure) {
     SS S = {0};
     S.n = n; S.q = q; S.ptr = ptr; S.idx = idx; S.val = val; S.pid = pid; S.pr = pr; S.ps = ps; S.np = np; S.B = B;
     S.pos = pos; S.F = F;
@@ -409,7 +411,7 @@ void pfa_anneal_sparse_swap(const int64_t *ptr, const int *idx, const double *va
     tabu_new(&tb, n, q, tenure);
     long *out = malloc(sizeof(long) * (q + 1)); int *moved = malloc(sizeof(int) * (n + 2));
     sparse_swap_loop(&S, &tb, out, moved, nsteps, beta_start, beta_max, E_io, best_io, best_pos, late_io, late_pos,
-                     seed, lambda);
+                     marks, seed, lambda);
     tabu_free(&tb);
     tree_free(&S.L); tree_free(&S.K); tree_free(&S.C);
     free(S.start); free(S.count); free(S.at); free(S.x); free(S.Fcur); free(S.tab); free(S.kappa); free(S.mark);

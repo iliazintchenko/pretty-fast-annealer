@@ -67,16 +67,18 @@ static inline int cat_pass(double *F, const float *S, const double *ra, const do
 // one[r]: the slot of a two-value variable r, else -1.
 ANNEAL_ATTR static void cat_loop(const double *Jt, double *F, int m, int V, const int *grp, int *cur,
                                  const float *noise, long nmoves, double beta_start, double beta_max, double *E_io,
-                                 double *best_io, int *best_cur, double *late_io, int *late_cur, uint64_t seed,
-                                 double lambda, int tenure, double *pen, long *last, int *recent, float *o, float *S,
-                                 const int *multi, const int *mfirst, int nmulti, const int *one, const int *blk,
-                                 const double *zero) {
+                                 double *best_io, int *best_cur, double *late_io, int *late_cur, double *marks,
+                                 uint64_t seed, double lambda, int tenure, double *pen, long *last, int *recent,
+                                 float *o, float *S, const int *multi, const int *mfirst, int nmulti, const int *one,
+                                 const int *blk, const double *zero) {
     double E = *E_io, best = *best_io, beta = beta_start, dbeta = (beta_max - beta_start) / (double)(nmoves - 1);
     uint64_t x = seed | 1;
     const double *ra = 0, *rb = zero;   // rows of the last move, applied in the next pass (none yet: add zeros)
     int at_best = 0;                    // the current state is the best one of this half, not yet in best_cur
     for (long t = 0; t < nmoves; t++) {
+        if (t == 3 * nmoves / 4) marks[1] = best;   // the half's lowest at three quarters
         if (t == nmoves / 2) {   // the second half starts: its lowest state so far is the current one
+            marks[0] = E;   // the energy at the half
             if (at_best) __builtin_memcpy(best_cur, cur, sizeof(int) * V);
             *best_io = best; best = E; best_cur = late_cur; at_best = 1;
         }
@@ -117,7 +119,8 @@ ANNEAL_ATTR static void cat_loop(const double *Jt, double *F, int m, int V, cons
 // As pfa_anneal_spin otherwise.
 void pfa_anneal_categorical(const double *Jt, double *F, int m, int V, const int *grp, int *cur, const float *noise,
                             long nmoves, double beta_start, double beta_max, double *E_io, double *best_io,
-                            int *best_cur, double *late_io, int *late_cur, uint64_t seed, double lambda, int tenure) {
+                            int *best_cur, double *late_io, int *late_cur, double *marks, uint64_t seed, double lambda,
+                            int tenure) {
     double *pen = calloc(V, sizeof(double)), *zero = calloc(m, sizeof(double));
     float *o = calloc(V + 64, sizeof(float)), *S = malloc(sizeof(float) * m);
     long *last = malloc(sizeof(long) * V);
@@ -140,7 +143,7 @@ void pfa_anneal_categorical(const double *Jt, double *F, int m, int V, const int
         blk[j] = gj[0] == gj[7] ? gj[0] : spins ? V : -1;
     }
     cat_loop(Jt, F, m, V, grp, cur, noise, nmoves, beta_start, beta_max, E_io, best_io, best_cur, late_io, late_cur,
-             seed, lambda, tenure, pen, last, recent, o, S, multi, mfirst, nmulti, one, blk, zero);
+             marks, seed, lambda, tenure, pen, last, recent, o, S, multi, mfirst, nmulti, one, blk, zero);
     free(pen); free(o); free(S); free(zero); free(last); free(recent); free(multi); free(mfirst); free(one); free(blk);
 }
 

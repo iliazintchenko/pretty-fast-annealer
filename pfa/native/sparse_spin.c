@@ -9,8 +9,9 @@
 // pen, last, recent: as in the spin kernel. moved: spins flipped since sbest last held the state.
 static void sparse_loop(const int64_t *ptr, const int *idx, const double *val, double *phi, float *s, int n,
                         long nflips, double beta_start, double beta_max, double *E_io, double *best_io, float *sbest,
-                        double *late_io, float *slate, uint64_t seed, double lambda, int tenure, double *pen,
-                        long *last, int *recent, int *moved, Sums *sums) {
+                        double *late_io, float *slate, double *marks, uint64_t seed, double lambda,
+                        int tenure,
+                        double *pen, long *last, int *recent, int *moved, Sums *sums) {
     double E = *E_io, best = *best_io, beta = beta_start, dbeta = (beta_max - beta_start) / (double)(nflips - 1);
     uint64_t rng = seed | 1;
     int at_best = 0;     // the current state is the best one of this half and sbest does not hold it yet
@@ -22,7 +23,9 @@ static void sparse_loop(const int64_t *ptr, const int *idx, const double *val, d
 #define NEW_X(J) { sums->x[J] = 4.0 * (double)s[J] * phi[J]; sums_refresh(sums, J, (J) + 1); }
     for (int j = 0; j < n; j++) sums->x[j] = 4.0 * (double)s[j] * phi[j];
     for (long t = 0; t < nflips; t++) {
+        if (t == 3 * nflips / 4) marks[1] = best;   // the half's lowest at three quarters
         if (t == nflips / 2) {   // the second half starts: its lowest state so far is the current one
+            marks[0] = E;   // the energy at the half
             if (at_best) KEEP_BEST
             *best_io = best; best = E; sbest = slate;
             __builtin_memcpy(sbest, s, sizeof(float) * n); nmoved = 0;
@@ -68,15 +71,16 @@ static void sparse_loop(const int64_t *ptr, const int *idx, const double *val, d
 // and no first spin; everything else as pfa_anneal_spin.
 void pfa_anneal_sparse_spin(const int64_t *ptr, const int *idx, const double *val, double *phi, float *s, int n,
                             long nflips, double beta_start, double beta_max, double *E_io, double *best_io,
-                            float *sbest, double *late_io, float *slate, uint64_t seed, double lambda, int tenure) {
+                            float *sbest, double *late_io, float *slate, double *marks, uint64_t seed, double lambda,
+                            int tenure) {
     double *pen = calloc(n, sizeof(double));
     long *last = malloc(sizeof(long) * n);
     int *recent = malloc(sizeof(int) * (tenure > 0 ? tenure : 1)), *moved = malloc(sizeof(int) * n);
     Sums sums;
     sums_new(&sums, n);
     for (int j = 0; j < n; j++) last[j] = -1;
-    sparse_loop(ptr, idx, val, phi, s, n, nflips, beta_start, beta_max, E_io, best_io, sbest, late_io, slate, seed,
-                lambda, tenure, pen, last, recent, moved, &sums);
+    sparse_loop(ptr, idx, val, phi, s, n, nflips, beta_start, beta_max, E_io, best_io, sbest, late_io, slate, marks,
+                seed, lambda, tenure, pen, last, recent, moved, &sums);
     sums_free(&sums);
     free(pen); free(last); free(recent); free(moved);
 }

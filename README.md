@@ -58,7 +58,8 @@ Each step makes one move, chosen among all moves of all variables with probabili
 p(r→k) = e^(−β ΔE(r→k)) / Σ over all moves e^(−β ΔE)
 ```
 
-while the inverse temperature β rises linearly from 0 to `beta_max`. Every state has one value per variable. So a
+while the inverse temperature β rises linearly from 0 to the end of cooling, `beta_max` in the first repetition and
+found by the repetitions after that (see The end of cooling). Every state has one value per variable. So a
 variable that must take exactly one of several values is not written as a one-hot group of spins, where every single
 flip breaks the constraint and a penalty must hold it: there is no penalty to set and no barrier between the values,
 and a move changes the whole variable in one step.
@@ -84,24 +85,43 @@ few variables back and forth.
 
 λ is in units of the temperature and the tenure a fraction of V, so the rule is unchanged when the energy is rescaled
 (f, T, β → αf, αT, β/α) or V grows. Both constants are tuned on benchmarks, not derived, and set by `tabu_lambda` and
-`tabu_tenure`. The tabu breaks detailed balance, which an optimizer doesn't need. With it, the best `beta_max` is
+`tabu_tenure`. The tabu breaks detailed balance, which an optimizer doesn't need. With it, the best end of cooling is
 roughly twice what it is without, and the re-annealing and the tabu on the value left moved it colder again on
-structured problems: the best end of cooling changes with every change to the walk and has to be measured again, and
-it differs between problem classes at the same scale of ΔE (on quadratic assignment, by four times between random
-and grid instances).
+structured problems: the best end of cooling changes with every change to the walk, and it differs between problem
+classes at the same scale of ΔE (on quadratic assignment, by four times between random and grid instances). So the
+repetitions find it (see The end of cooling).
 
 **Repetitions.** Repetition 1 of R starts from a random value for every variable at β = 0. Each later one, a restart,
 starts from the best state so far, with new random numbers and β starting partway up the ramp:
 
 ```
-repetition 1:  random values        β: 0                  → beta_max
-restart:       best state so far    β: u/(R−1)·beta_max   → beta_max
+repetition 1:  random values        β: 0               → beta_max
+restart:       best state so far    β: u/(R−1)·β_end   → β_end
 ```
 
-where u is 1 plus the number of restarts so far that brought nothing, that is, did not lower the best energy. The
-restarts form an outer anneal: each reheats the best state, at first hot enough to leave its basin and search widely,
-later only enough to refine it. The starting β rises by one step of `beta_max`/(R−1) each time a restart brings
-nothing, so the restarts stay hot for as long as hot restarts pay.
+where β_end is the restart's end of cooling (below) and u the number of restarts so far that brought nothing, that
+is, did not lower the best energy. The first restart reheats to β = 0, a second anneal from scratch that gives the
+recombination two independent states. The restarts form an outer anneal: each reheats the best state, at first hot
+enough to leave its basin and search widely, later only enough to refine it. The starting β rises by one step of
+β_end/(R−1) each time a restart brings nothing, so the restarts stay hot for as long as hot restarts pay.
+
+**The end of cooling.** Where the cooling should end is the one quantity the walk cannot know in advance. Too hot and
+the state is still moving when the anneal stops; too cold and the second half of every anneal is spent frozen. The
+right end differs between problem classes by an order of magnitude at the same scale of ΔE and moves with every change
+to the walk, so the repetitions find it. Each anneal reports whether it was still improving when it stopped: its last
+quarter lowered its lowest state by more than a tenth of what its third quarter did. A ratio, so the reading is the
+same at every size and energy scale, where a count of idle steps is not. After an anneal that had frozen, the next ends
+twice as hot, until one is seen still improving. That end and twice it form a pair, and the repetitions alternate
+between the two. Once both ends have been run as restarts, the pair moves one factor towards the end whose restarts
+lowered the best energy more; when that direction reverses, the best end lies within the pair, which narrows, its
+factor to its square root, around the winner: a line search that homes in. The two ends are compared by what they
+gained, not by what the trace says, because on a landscape whose scale changes as the state settles the trace follows
+the smallest scale and the gains follow the energy. `beta_max` is only the end of the first repetition. Against the
+fixed end found by a scan over `beta_max`, an oracle no unseen instance gets, the moving end ties within noise on
+most problem classes, wins by a factor two on a dense glass and trails by one standard error on a sparse one; against
+any fixed end off by a factor two or more it wins outright. What it does not choose is the length
+of an anneal: a schedule of doubling lengths covers that axis without a parameter, but the end is found across
+anneals and a geometric schedule has too few anneals that carry budget to find it.
 
 **Elimination.** Before the anneal, the problem loses the values that no optimum needs. Value a of variable r is
 removed when another value b of r has
@@ -158,7 +178,7 @@ there is one cluster, and the fold alone keeps the lower state.
 
 **Re-annealing.** What the fold cannot take, the variables on which the states still differ, is annealed again as a
 problem of its own. The agreeing variables stay fixed and their couplings to the differing ones go into the fields;
-the differing variables start from random values and anneal from β = 0 to `beta_max`, with steps in proportion to
+the differing variables start from random values and anneal from β = 0 to the repetition's end, with steps in proportion to
 their share of the moves. What the anneal finds folds into the best state. When that lowers it, the anneal's two
 states are new material: the variables on which they differ from the best state are annealed again, round after
 round, until an anneal brings nothing. Two low states of a dense problem that share most variables usually hold the
@@ -530,9 +550,9 @@ each variable (int64). Its parameters:
 | `sizes` | the number of values of each variable | `None` (spins) | Variable r takes a value in 0 … `sizes[r]` − 1. Each value other than 0 has a row and column of `couplings` and an entry of `fields`, ordered by variable (variable 0's values 1 … `sizes[0]` − 1 first), so n = Σ (`sizes[r]` − 1). The energy is the fields of the values taken plus each coupling between two of them once: ½ xᵀ C x + fᵀ x with x_k = 1 for the values taken. Couplings between values of the same variable must be zero. Values that no optimum needs are removed first (see Elimination). |
 | `counts` | the number of variables at each of q values, summing to n | `None` | Variable r takes a value in 0 … q − 1, and `counts[v]` variables are at value v throughout (see Exchanges). The energy is Σ_r `fields[r, x_r]` + Σ_{r<s} `couplings[r, s]` · `table[x_r, x_s]`. k of n: `counts` (n − k, k) with `table` [[0, 0], [0, 1]]; parts of given sizes: `table` 1 − I to count the edges between parts; a permutation: `counts` all 1, `table` the distances. |
 | `table` | with `counts`, the q × q symmetric table between the values | required with `counts` | |
-| `beta_max` | the final inverse temperature | `1.0` | Measured in 1/energy: scaling the energy by α scales the best `beta_max` by 1/α, so the default suits only ΔE of order one. A linear schedule is nearly as good as optimized ones (Isakov et al.). |
+| `beta_max` | the end of cooling of the first repetition | `1.0` | Measured in 1/energy: scaling the energy by α scales it by 1/α, so the default suits only ΔE of order one. The later repetitions find the end themselves, a factor two per repetition from this start (see The end of cooling), so a start within a factor ten costs a few repetitions and a start off by a thousand costs ten. A linear schedule is nearly as good as optimized ones (Isakov et al.). |
 | `num_steps` | steps per repetition, the length of the anneal | `1000` | The budget of one repetition: on the array kernels num_steps · n field updates, or num_steps / V moves per variable. Longer anneals track the cooling more closely and reach lower energies. |
-| `num_reps` | repetitions of the anneal, R | `1` | The first starts from a random value for every variable; each later one restarts from the best state so far with β rising from u/(R−1)·`beta_max`, u being 1 plus the number of restarts so far that did not lower the best energy (see Repetitions). After each repetition the best state takes the clusters of variables that the repetition has lower, and the variables that still differ are annealed again (see Recombination). |
+| `num_reps` | repetitions of the anneal, R | `1` | The first starts from a random value for every variable; each later one restarts from the best state so far with β rising from u/(R−1) of its end of cooling, u being the number of restarts so far that did not lower the best energy (see Repetitions), and the end of cooling moves between repetitions (see The end of cooling). After each repetition the best state takes the clusters of variables that the repetition has lower, and the variables that still differ are annealed again (see Recombination). |
 | `seed` | random seed | `42` | Sets the first repetition's state and every repetition's Gumbel noise vector and offsets, or on the sparse kernels its draws, so results are reproducible. |
 | `tabu_lambda` | the tabu penalty λ, in temperatures | `3.0` | Divides the weight of a variable's moves by e^λ just after it moved (see Tabu). Rarely worth changing. |
 | `tabu_tenure` | the tabu tenure, as a fraction of the number of variables V | `0.25` | A variable stays tabu for `tabu_tenure` · V steps; with `counts`, its return to the value it left is tabu for `tabu_tenure` times the mean number of steps between two moves of a variable at that value. 0 turns the tabu off. Rarely worth changing. |
