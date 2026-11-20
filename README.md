@@ -88,11 +88,9 @@ few variables back and forth.
 
 λ is in units of the temperature and the tenure a fraction of V, so the rule is unchanged when the energy is rescaled
 (f, T, β → αf, αT, β/α) or V grows. Both constants are tuned on benchmarks, not derived, and set by `tabu_lambda` and
-`tabu_tenure`. The tabu breaks detailed balance, which an optimizer doesn't need. With it, the best end of cooling is
-roughly twice what it is without, and the re-annealing and the tabu on the value left moved it colder again on
-structured problems: the best end of cooling changes with every change to the walk, and it differs between problem
-classes at the same scale of ΔE (on quadratic assignment, by four times between random and grid instances). So the
-walk reads it from the problem (see The budget).
+`tabu_tenure`. The tabu breaks detailed balance, which an optimizer doesn't need. It also moves the best end of
+cooling, as every change to the walk does, and that end differs between problem classes at the same scale of ΔE. So
+the walk reads it from the problem (see The budget).
 
 **The budget.** `num_steps` is the total number of steps and the only number. What an anneal needs besides is where
 in β the problem's variables freeze and how much time each part of that range deserves, and both are read from the
@@ -118,14 +116,11 @@ whatever the budget. Where the weight is homogeneous, the weight mobility is the
 after the scan covers the scanned range with its slices shared among the doublings in proportion to the weight that
 froze in each, geometric within a doubling; a doubling in which no weight froze gets no slice. So the time goes where
 the energy is decided, the end of cooling is the last doubling in which any weight froze, and neither is chosen:
-`beta_max` is gone. Every other weighting loses: time shifted colder than the fall (in proportion to the hazard, to
-the inverse of the mobility, linear in β) loses the more the further it goes, and time shifted hotter (towards the
-energy at stake, which is largest where the easy, heavy decisions are) loses on the dense glasses. Of the readings
-tried for the end, the fall of the weight is the one that holds on every class measured. The agreement of two
-restarts on the variables that froze in a doubling separates structured from unstructured landscapes, not the classes
-that need their tail from those that do not; the gain of a restart's lowest state is crumbs to its last slice on every
-class, whatever the range; the relaxation of the energy within a slice is complete at every β on every class, so no
-relaxation time can be read from it.
+`beta_max` is gone. The fall of the weight is the quantity because the energy an anneal decides in a doubling is the
+weight of what freezes there: a weighting that favours the cold end spends the budget on variables already decided,
+one that favours the hot end spends it on the heavy, easy decisions that one sweep settles. The energy level itself
+does not read the end, since the walk's energy settles within one slice at every β, and nor does the agreement of two
+restarts on what froze, which tells structured landscapes from unstructured ones but not where the decisions stop.
 
 **Restarts.** The first anneal is the scan itself. Each later one, a restart, starts from the best state so far,
 melts it in one slice from β = 0 to the hot edge of the range, and anneals on the schedule. Melting fully beats every
@@ -193,29 +188,23 @@ when the best energy stays where it was.
 
 How much this gives depends on how two low states differ. If the couplings are sparse and fields or a few strong
 couplings hold most variables in place, low states differ in many small clusters, and the best state improves cluster
-by cluster. On problems of that kind (side-chain packing, MAX-2-SAT, sparse glasses with fields or with couplings on
-several scales), at budgets of ten and thirty anneals the final energy was lower in 82 of 84 trials (seven problems,
-six seeds, both budgets) than with the earlier scheme, no recombination and every restart one step colder than the
-last whatever it brought. If every two variables are coupled, or the states differ on so many variables that the clusters merge,
-there is one cluster, and the fold alone keeps the lower state.
+by cluster: side-chain packing, MAX-2-SAT, sparse glasses with fields or with couplings on several scales. If every
+two variables are coupled, or the states differ on so many variables that the clusters merge, there is one cluster,
+and the fold alone keeps the lower state.
 
 **Re-annealing.** What the fold cannot take, the variables on which the states still differ, is annealed again as a
 problem of its own. The agreeing variables stay fixed and their couplings to the differing ones go into the fields;
 the differing variables are melted and annealed on the scan's schedule (spins) or linear from β = 0 to its cold end
 (variables with more values, exchanges), with steps in proportion to their share of the moves. Where that anneal
-ends decides as much as where the restarts end: on the sparse glass with couplings on several scales, re-annealing the
-leftovers to sixteen times the right end quenches them and triples the gap. What the anneal finds folds into the
-best state. When that lowers it, the anneal's two
+ends matters as much as where the restarts end: a re-anneal stretched far past the range in which its variables
+freeze passes through that range too fast and quenches them. What the anneal finds folds into the best state. When
+that lowers it, the anneal's two
 states are new material: the variables on which they differ from the best state are annealed again, round after
 round, until an anneal brings nothing. Two low states of a dense problem that share most variables usually hold the
 shared part right and the rest in two arrangements of about the same cost, and the anneal of the rest alone, under the
 shared part as fields, looks for a third. Two states that share nothing leave nothing to fix, and nothing is done.
-
-On quadratic assignment, where every two variables are coupled and the fold alone takes nothing, the re-annealing
-cut the distance to the best known values by three to five times at equal time on the instances whose low states
-share many assignments (distances on a grid, structured flows), and left the random instances, whose low states share
-almost nothing, within the spread between seeds. On spin glasses, dense or sparse, the results stayed within the
-spread between seeds at equal steps, the re-anneals adding up to 40% to the time on the dense ones.
+Where every two variables are coupled and the fold alone takes nothing, as in quadratic assignment, the re-annealing
+is the recombination, and it works where low states share many assignments and not where they share none.
 
 Both recombinations need the states in one frame. When the couplings have a symmetry (the reflections and rotations
 of a grid of locations), independent anneals land in different images of the same optimum, share no variables, and
@@ -239,9 +228,7 @@ variable has left, not on the variable: after the exchange, r's moves to a and s
 for `tabu_tenure` times the mean number of steps between two moves of a variable at that value (the pairs divided by
 the positions of the other values: n/2 steps in a permutation). A pair's penalty is the sum of its two reassignments'.
 The two variables stay free to move elsewhere, so a long tenure does not freeze the state, it forbids the way back:
-the walk between low states cannot retrace itself and has to go on. Against the tabu on the variable, at five minutes
-on quadratic assignment, the random instances closed two thirds of their distance to the best known values and the
-structured ones a third to two thirds; the grid instances stayed where they were.
+the walk between low states cannot retrace itself and has to go on.
 Recombination needs clusters that keep the counts: besides the pairs with I_rs ≠ 0, the differing variables are
 joined along the cycles of their exchanges, the arcs a_r → b_r on the values, where every value has as many arcs in
 as out. Every cluster then moves as many variables into each value as out of it, and taking it keeps the counts. For a
