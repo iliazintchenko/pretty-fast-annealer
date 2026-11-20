@@ -1,4 +1,4 @@
-"""Steps per second of the array spin kernel on a dense problem; beta_max does not affect it."""
+"""Steps per second of the array spin kernel on a dense problem."""
 import os
 import sys
 import time
@@ -17,7 +17,7 @@ fields = rng.normal(0, 1, n)
 
 num_steps = 100 * n
 t = time.perf_counter()
-pfa.run(couplings, fields, beta_max=1.0, num_steps=num_steps)
+pfa.run(couplings, fields, num_steps=num_steps)
 dt = time.perf_counter() - t
 print(
     f"{n} spins, {pfa.simd_path()}: {num_steps / dt / 1e6:.2f} M flips/s, "

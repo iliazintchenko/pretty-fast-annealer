@@ -33,10 +33,13 @@ all variables by its Boltzmann weight.
 ```python
 import pfa
 
-spins = pfa.run(couplings, fields, beta_max=1.0, num_steps=100 * len(couplings), num_reps=10)
-values = pfa.run(couplings, fields, sizes=sizes, num_steps=100 * len(sizes), num_reps=10)
-values = pfa.run(couplings, fields, counts=counts, table=table, num_steps=100 * len(couplings), num_reps=10)
+spins = pfa.run(couplings, fields, num_steps=1000 * len(couplings))
+values = pfa.run(couplings, fields, sizes=sizes, num_steps=1000 * len(sizes))
+values = pfa.run(couplings, fields, counts=counts, table=table, num_steps=1000 * len(couplings))
 ```
+
+The budget, `num_steps`, is the only number. Everything else the anneal needs, it reads from the problem (see The
+budget).
 
 ## Philosophy
 
@@ -58,8 +61,8 @@ Each step makes one move, chosen among all moves of all variables with probabili
 p(r→k) = e^(−β ΔE(r→k)) / Σ over all moves e^(−β ΔE)
 ```
 
-while the inverse temperature β rises linearly from 0 to the end of cooling, `beta_max` in the first repetition and
-found by the repetitions after that (see The end of cooling). Every state has one value per variable. So a
+while the inverse temperature β rises, over the range of β in which the problem's variables freeze and at the pace
+at which they freeze, both read from the problem (see The budget). Every state has one value per variable. So a
 variable that must take exactly one of several values is not written as a one-hot group of spins, where every single
 flip breaks the constraint and a penalty must hold it: there is no penalty to set and no barrier between the values,
 and a move changes the whole variable in one step.
@@ -89,39 +92,59 @@ few variables back and forth.
 roughly twice what it is without, and the re-annealing and the tabu on the value left moved it colder again on
 structured problems: the best end of cooling changes with every change to the walk, and it differs between problem
 classes at the same scale of ΔE (on quadratic assignment, by four times between random and grid instances). So the
-repetitions find it (see The end of cooling).
+walk reads it from the problem (see The budget).
 
-**Repetitions.** Repetition 1 of R starts from a random value for every variable at β = 0. Each later one, a restart,
-starts from the best state so far, with new random numbers and β starting partway up the ramp:
+**The budget.** `num_steps` is the total number of steps and the only number. What an anneal needs besides is where
+in β the problem's variables freeze and how much time each part of that range deserves, and both are read from the
+problem by a scan before the restarts begin. The scan starts from a random state at a tenth of the β scale, one over
+the mean |ΔE| of a move from that state, and cools in slices of eight sweeps (eight moves per variable, one kernel
+call), doubling β every two slices. After every slice it compares the slice's lowest state with the previous slice's
+and records which variables differ. Counting them is the wrong measure: on a sparse glass with couplings on several
+scales a third of the spins keep flickering long after the energy is decided, because every coupling they have is
+small, and counting them sends the anneal far too cold and starves the part that matters. Each variable is weighted
+instead by the energy it can move,
 
 ```
-repetition 1:  random values        β: 0               → beta_max
-restart:       best state so far    β: u/(R−1)·β_end   → β_end
+W_r = Σ_s |T_rs| + |f_r|        (spins: Σ_s |J_rs| + |h_r|; exchanges: Σ_s |A_rs| plus the mean |f_r(k)|)
 ```
 
-where β_end is the restart's end of cooling (below) and u the number of restarts so far that brought nothing, that
-is, did not lower the best energy. The first restart reheats to β = 0, a second anneal from scratch that gives the
-recombination two independent states. The restarts form an outer anneal: each reheats the best state, at first hot
-enough to leave its basin and search widely, later only enough to refine it. The starting β rises by one step of
-β_end/(R−1) each time a restart brings nothing, so the restarts stay hot for as long as hot restarts pay.
+and the scan records at every doubling the **weight mobility**, the share of the total weight carried by the
+variables that still moved. The spins that flicker late are a fifth of the count and a fiftieth of the weight. On a
+problem whose late movers are heavy, frustrated variables with full-weight couplings whose fields cancel, weight and
+count agree, and the tail is kept. The scan ends two doublings after the weight mobility has fallen under a tenth,
+whatever the budget. Where the weight is homogeneous, the weight mobility is the count mobility, and nothing changes.
 
-**The end of cooling.** Where the cooling should end is the one quantity the walk cannot know in advance. Too hot and
-the state is still moving when the anneal stops; too cold and the second half of every anneal is spent frozen. The
-right end differs between problem classes by an order of magnitude at the same scale of ΔE and moves with every change
-to the walk, so the repetitions find it. Each anneal reports whether it was still improving when it stopped: its last
-quarter lowered its lowest state by more than a tenth of what its third quarter did. A ratio, so the reading is the
-same at every size and energy scale, where a count of idle steps is not. After an anneal that had frozen, the next ends
-twice as hot, until one is seen still improving. That end and twice it form a pair, and the repetitions alternate
-between the two. Once both ends have been run as restarts, the pair moves one factor towards the end whose restarts
-lowered the best energy more; when that direction reverses, the best end lies within the pair, which narrows, its
-factor to its square root, around the winner: a line search that homes in. The two ends are compared by what they
-gained, not by what the trace says, because on a landscape whose scale changes as the state settles the trace follows
-the smallest scale and the gains follow the energy. `beta_max` is only the end of the first repetition. Against the
-fixed end found by a scan over `beta_max`, an oracle no unseen instance gets, the moving end ties within noise on
-most problem classes, wins by a factor two on a dense glass and trails by one standard error on a sparse one; against
-any fixed end off by a factor two or more it wins outright. What it does not choose is the length
-of an anneal: a schedule of doubling lengths covers that axis without a parameter, but the end is found across
-anneals and a geometric schedule has too few anneals that carry budget to find it.
+**The schedule.** The fall of the weight mobility across a doubling is the weight that froze in it. Every anneal
+after the scan covers the scanned range with its slices shared among the doublings in proportion to the weight that
+froze in each, geometric within a doubling; a doubling in which no weight froze gets no slice. So the time goes where
+the energy is decided, the end of cooling is the last doubling in which any weight froze, and neither is chosen:
+`beta_max` is gone. Every other weighting loses: time shifted colder than the fall (in proportion to the hazard, to
+the inverse of the mobility, linear in β) loses the more the further it goes, and time shifted hotter (towards the
+energy at stake, which is largest where the easy, heavy decisions are) loses on the dense glasses. Of the readings
+tried for the end, the fall of the weight is the one that holds on every class measured. The agreement of two
+restarts on the variables that froze in a doubling separates structured from unstructured landscapes, not the classes
+that need their tail from those that do not; the gain of a restart's lowest state is crumbs to its last slice on every
+class, whatever the range; the relaxation of the energy within a slice is complete at every β on every class, so no
+relaxation time can be read from it.
+
+**Restarts.** The first anneal is the scan itself. Each later one, a restart, starts from the best state so far,
+melts it in one slice from β = 0 to the hot edge of the range, and anneals on the schedule. Melting fully beats every
+partial reheat: a restart's descent is not gain on the best state until its last slices, and a reheat to the typical
+field already half-melts the best state, whose fields are two to three times the random start's. A restart costs what
+the scan cost, one pass over the freezing range at the scan's resolution, and the budget buys their number: a budget
+of ten passes buys a few restarts, a budget of a hundred buys fifty or more. After every anneal its two lowest states fold into
+the best state and the variables that still differ are annealed again (see Recombination). The restarts' length is
+the one lever the problem does not read: classes whose restarts agree with each other on most variables want fewer,
+longer ones, and classes whose restarts are independent samples want many short ones, by a factor of two at most in
+the final gap, and nothing in the scan or in the fold separates them.
+
+Against the loop before it, fixed-length repetitions from `beta_max` with the end of cooling moved between them by
+their outcomes, at the same budget on the same problems: on dense and sparse spin glasses, MAX-2-SAT, side-chain
+packing, colouring and tours the loop ties or wins at a budget of thirty passes and wins on every class at a hundred,
+by two to three times on the glasses, with the lowest energy ever seen reached in every seed on the dense glass; on
+quadratic assignment the structured instances, distances on a grid or structured flows, reach the best known values
+in every seed at every budget where the old loop did not, and the random instances trail it by a third, the length
+lever. At a budget of ten passes the scan is most of it and the loop ties the old one.
 
 **Elimination.** Before the anneal, the problem loses the values that no optimum needs. Value a of variable r is
 removed when another value b of r has
@@ -142,7 +165,7 @@ parameter. How much goes depends on the problem: a value goes when its field cos
 win back against some other value. Problems given as spins are not reduced. For a spin the test would be
 |h_i| ≥ Σ_j |J_ij|: a field that outweighs all the spin's couplings together.
 
-**Recombination.** A repetition whose lowest state is above the best state can still hold some variables in a better
+**Recombination.** An anneal whose lowest state is above the best state can still hold some variables in a better
 arrangement. Take two states a and b, and the variables on which they differ. Setting variables r and s of a to their
 values in b changes its energy by
 
@@ -162,24 +185,27 @@ no such pair joins two clusters. Setting a whole cluster G to its values in b ch
 whatever is done to the other clusters, so a takes every cluster with Δ(G) < 0. That is the lowest of the 2^m states
 that have each of the m clusters from a or from b, found in one pass and never above either.
 
-Each repetition records two states: the lowest of the first half of its steps and the lowest of the second half. In a
-restart the first is usually the state it started from; the second is where the reheated anneal settled, a different
-state of low energy. After the repetition, the lowest of three states, these two and the best state so far, becomes
-the best state and takes from the other two every cluster they have lower. A repetition that ends above the best
-state still contributes its good parts, and brings nothing only when the best energy stays where it was.
+Each anneal records two states: the lowest of the first half of its slices and the lowest of the second half, one in
+the fall and one where the anneal settled, two states of low energy that differ. After the anneal, the lowest of
+three states, these two and the best state so far, becomes the best state and takes from the other two every cluster
+they have lower. An anneal that ends above the best state still contributes its good parts, and brings nothing only
+when the best energy stays where it was.
 
 How much this gives depends on how two low states differ. If the couplings are sparse and fields or a few strong
 couplings hold most variables in place, low states differ in many small clusters, and the best state improves cluster
 by cluster. On problems of that kind (side-chain packing, MAX-2-SAT, sparse glasses with fields or with couplings on
-several scales), with R = 10 and R = 30 the final energy was lower in 82 of 84 trials (seven problems, six seeds, both
-values of R) than with the earlier scheme, no recombination and every restart one step colder than the last whatever
-it brought. If every two variables are coupled, or the states differ on so many variables that the clusters merge,
+several scales), at budgets of ten and thirty anneals the final energy was lower in 82 of 84 trials (seven problems,
+six seeds, both budgets) than with the earlier scheme, no recombination and every restart one step colder than the
+last whatever it brought. If every two variables are coupled, or the states differ on so many variables that the clusters merge,
 there is one cluster, and the fold alone keeps the lower state.
 
 **Re-annealing.** What the fold cannot take, the variables on which the states still differ, is annealed again as a
 problem of its own. The agreeing variables stay fixed and their couplings to the differing ones go into the fields;
-the differing variables start from random values and anneal from β = 0 to the repetition's end, with steps in proportion to
-their share of the moves. What the anneal finds folds into the best state. When that lowers it, the anneal's two
+the differing variables are melted and annealed on the scan's schedule (spins) or linear from β = 0 to its cold end
+(variables with more values, exchanges), with steps in proportion to their share of the moves. Where that anneal
+ends decides as much as where the restarts end: on the sparse glass with couplings on several scales, re-annealing the
+leftovers to sixteen times the right end quenches them and triples the gap. What the anneal finds folds into the
+best state. When that lowers it, the anneal's two
 states are new material: the variables on which they differ from the best state are annealed again, round after
 round, until an anneal brings nothing. Two low states of a dense problem that share most variables usually hold the
 shared part right and the rest in two arrangements of about the same cost, and the anneal of the rest alone, under the
@@ -193,8 +219,9 @@ spread between seeds at equal steps, the re-anneals adding up to 40% to the time
 
 Both recombinations need the states in one frame. When the couplings have a symmetry (the reflections and rotations
 of a grid of locations), independent anneals land in different images of the same optimum, share no variables, and
-the fold and the re-anneal take nothing from each other; `run()` does not align them. Restarts from the best state
-stay in its frame when the reheat is mild and leave it when it is not.
+the fold and the re-anneal take nothing from each other; `run()` does not align them. A melted restart lands where it
+will, so on a landscape with symmetries the fold works only where the restart happens to land in the best state's
+frame.
 
 **Exchanges.** With `counts`, the number of variables at each value is fixed: k of n items chosen, a graph cut into
 parts of given sizes, a permutation with one variable per value. The couplings factor, T_rs(a, b) = A_rs B(a, b),
@@ -231,8 +258,8 @@ many replicas or sparse graphs (lookup tables, multi-spin coding, bipartite upda
 so is PFA's own storage for sparse couplings.
 
 SA proposes one spin at a time and accepts the flip with probability min(1, e^(−β ΔE_j)). As the anneal cools, it
-rejects almost every proposal; PFA never rejects. The comparison is of this step: repetitions, elimination and
-recombination sit outside it and would apply to either method.
+rejects almost every proposal; PFA never rejects. The comparison is of this step: the scan, the restarts, elimination
+and recombination sit outside it and would apply to either method.
 
 Each method ran with its final inverse temperature tuned for every length of anneal, on spin problems. A PFA flip
 costs **1.2–1.4×** an accepted SA flip; a rejected SA proposal costs about 1/n of an accepted flip. With flips and
@@ -311,7 +338,7 @@ given size. The tricks of the array kernels:
   ```
 
   so picking a move costs one multiply, one add and one comparison per row.
-- **Noise drawn once per repetition.** At step t, row k reads g_((k + ω_t) mod n), with a fresh random offset ω_t.
+- **Noise drawn once per slice.** At step t, row k reads g_((k + ω_t) mod n), with a fresh random offset ω_t.
   Each step on its own is exact Gumbel-max sampling; across steps the same values return shifted, a cheap stand-in
   for fresh noise. A random offset, unlike a shift by one, keeps large values from marching through neighbouring
   indices, so results don't depend on the order of the variables. The vector is stored as g followed by g, so the n
@@ -350,7 +377,7 @@ given size. The tricks of the array kernels:
   variable with two values among variables with more has it added into F the same way; a variable with more values
   has it in o_r. The pass reads nothing extra; the anneal loop adds and removes penalties
   at O(1) per step.
-- **Energy tracked, not computed.** E += ΔE at each move, O(1). The lowest state of each half of a repetition is
+- **Energy tracked, not computed.** E += ΔE at each move, O(1). The lowest state of each half of a slice is
   copied only when the anneal steps up from a new low, so a descent through many new lows costs one copy.
 
 ### Sparse couplings
@@ -447,15 +474,13 @@ with more values, which reads both layouts as the elimination does.
   exactness is not. A cluster is taken when Δ(G) is below 0 by more than the rounding of its own sum, 2⁻⁴⁰ of the
   magnitudes summed: two arrangements of a cluster that tie exactly would otherwise be taken back and forth between
   the rounds, each time by a rounding error.
-- **Two states per repetition.** Each kernel keeps the lowest state of the first and of the second half of its
-  steps: at the midpoint the current state becomes the lowest so far of the second half. Where the split falls
-  matters little: at a quarter, three quarters or nine tenths of the steps the results were the same within the
-  spread between seeds. Without a split most of the gain is lost, because the lowest state of a whole restart is
-  usually the state it started from.
-- **Rounds.** The lowest of three states, the repetition's two and the state it started from, becomes the best state
-  and takes clusters from the other two, round after round until its energy, a float64, no longer falls. The first
-  repetition has only its two. A repetition brought nothing when that energy is not below the energy of the state it
-  started from.
+- **Two states per anneal.** Each kernel call, one slice, keeps the lowest state of the first and of the second half
+  of its steps, and the slice's lowest is the lower of the two. An anneal's two states are the lowest of the first
+  half of its slices and the lowest of the second half. Without the split most of the gain is lost, because the
+  lowest state of a whole anneal is one state.
+- **Rounds.** The lowest of three states, the anneal's two and the state it started from, becomes the best state and
+  takes clusters from the other two, round after round until its energy, a float64, no longer falls. The scan has
+  only its two. An anneal brought nothing when that energy is not below the energy of the state it started from.
 - **Re-anneals.** The problem of the differing variables is built from the kernel's own inputs: their couplings among
   themselves, their fields plus their couplings to the fixed variables at their values, and with `counts` the counts
   of their own values. `run()` picks the kernel for it again. The anneal returns its two states as whole states with
@@ -550,10 +575,8 @@ each variable (int64). Its parameters:
 | `sizes` | the number of values of each variable | `None` (spins) | Variable r takes a value in 0 … `sizes[r]` − 1. Each value other than 0 has a row and column of `couplings` and an entry of `fields`, ordered by variable (variable 0's values 1 … `sizes[0]` − 1 first), so n = Σ (`sizes[r]` − 1). The energy is the fields of the values taken plus each coupling between two of them once: ½ xᵀ C x + fᵀ x with x_k = 1 for the values taken. Couplings between values of the same variable must be zero. Values that no optimum needs are removed first (see Elimination). |
 | `counts` | the number of variables at each of q values, summing to n | `None` | Variable r takes a value in 0 … q − 1, and `counts[v]` variables are at value v throughout (see Exchanges). The energy is Σ_r `fields[r, x_r]` + Σ_{r<s} `couplings[r, s]` · `table[x_r, x_s]`. k of n: `counts` (n − k, k) with `table` [[0, 0], [0, 1]]; parts of given sizes: `table` 1 − I to count the edges between parts; a permutation: `counts` all 1, `table` the distances. |
 | `table` | with `counts`, the q × q symmetric table between the values | required with `counts` | |
-| `beta_max` | the end of cooling of the first repetition | `1.0` | Measured in 1/energy: scaling the energy by α scales it by 1/α, so the default suits only ΔE of order one. The later repetitions find the end themselves, a factor two per repetition from this start (see The end of cooling), so a start within a factor ten costs a few repetitions and a start off by a thousand costs ten. A linear schedule is nearly as good as optimized ones (Isakov et al.). |
-| `num_steps` | steps per repetition, the length of the anneal | `1000` | The budget of one repetition: on the array kernels num_steps · n field updates, or num_steps / V moves per variable. Longer anneals track the cooling more closely and reach lower energies. |
-| `num_reps` | repetitions of the anneal, R | `1` | The first starts from a random value for every variable; each later one restarts from the best state so far with β rising from u/(R−1) of its end of cooling, u being the number of restarts so far that did not lower the best energy (see Repetitions), and the end of cooling moves between repetitions (see The end of cooling). After each repetition the best state takes the clusters of variables that the repetition has lower, and the variables that still differ are annealed again (see Recombination). |
-| `seed` | random seed | `42` | Sets the first repetition's state and every repetition's Gumbel noise vector and offsets, or on the sparse kernels its draws, so results are reproducible. |
+| `num_steps` | the budget: steps in all, each one move | `1000` | On the array kernels num_steps · n field updates, or num_steps / V moves per variable. At least 16 per variable, one doubling of the scan. The scan takes what it needs, a few hundred moves per variable on most problems and more where the variables freeze over many decades of β, and the rest buys restarts of the scan's length (see The budget); the re-anneals of the differing variables come on top, in proportion to their share of the moves. More budget buys more restarts, and the energy keeps falling with it. |
+| `seed` | random seed | `42` | Sets the scan's starting state and every slice's Gumbel noise vector and offsets, or on the sparse kernels its draws, so results are reproducible. |
 | `tabu_lambda` | the tabu penalty λ, in temperatures | `3.0` | Divides the weight of a variable's moves by e^λ just after it moved (see Tabu). Rarely worth changing. |
 | `tabu_tenure` | the tabu tenure, as a fraction of the number of variables V | `0.25` | A variable stays tabu for `tabu_tenure` · V steps; with `counts`, its return to the value it left is tabu for `tabu_tenure` times the mean number of steps between two moves of a variable at that value. 0 turns the tabu off. Rarely worth changing. |
 

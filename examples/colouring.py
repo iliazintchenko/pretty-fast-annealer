@@ -33,7 +33,7 @@ couplings = couplings + couplings.T
 fields = -np.bincount(np.concatenate((rows_u.ravel(), rows_v.ravel())), minlength=(k - 1) * V).astype(float)
 constant = edges.shape[0]
 
-colours = pfa.run(couplings, fields, sizes=np.full(V, k), beta_max=4.0, num_steps=50 * V, num_reps=10)
+colours = pfa.run(couplings, fields, sizes=np.full(V, k), num_steps=500 * V)
 clashes = int(np.sum(colours[u] == colours[v]))
 taken = np.zeros((k - 1) * V)
 taken[(k - 1) * np.flatnonzero(colours) + colours[colours > 0] - 1] = 1.0

@@ -25,5 +25,5 @@ J, h, offset = pfa.from_binary(Q, q, c)
 x = np.array([0, 0, 0, 1])
 np.testing.assert_almost_equal(pfa.energy(2 * x - 1, J, h, offset), pfa.energy(x, Q, q, c))
 
-s = pfa.run(J, h, beta_max=3.0, num_steps=1000, num_reps=10)
+s = pfa.run(J, h, num_steps=10000)
 print("lowest state:", (s + 1) // 2, "energy:", pfa.energy(s, J, h, offset))

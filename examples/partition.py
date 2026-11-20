@@ -16,6 +16,6 @@ edges = np.unique(np.sort(edges[edges[:, 0] != edges[:, 1]], axis=1), axis=0)
 adjacency = np.zeros((V, V))
 adjacency[edges[:, 0], edges[:, 1]] = adjacency[edges[:, 1], edges[:, 0]] = 1.0
 
-side = pfa.run(adjacency, counts=[V // 2, V - V // 2], table=1.0 - np.eye(2), beta_max=3.0, num_steps=100 * V, num_reps=10)
+side = pfa.run(adjacency, counts=[V // 2, V - V // 2], table=1.0 - np.eye(2), num_steps=1000 * V)
 cut = int(np.sum(side[edges[:, 0]] != side[edges[:, 1]]))
 print(f"{V} vertices, {len(edges)} edges: {cut} edges cut by a balanced bisection")

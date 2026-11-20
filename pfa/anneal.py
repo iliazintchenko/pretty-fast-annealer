@@ -169,9 +169,7 @@ def run(
     sizes: np.ndarray | None = None,
     counts: np.ndarray | None = None,
     table: np.ndarray | None = None,
-    beta_max: float = 1.0,
     num_steps: int = 1000,
-    num_reps: int = 1,
     seed: int = 42,
     tabu_lambda: float = 3.0,
     tabu_tenure: float = 0.25,
@@ -181,23 +179,25 @@ def run(
     with sizes the energy of a categorical problem (below), with PFA, a
     rejection-free annealer (see the README): every step flips one spin,
     chosen with probability proportional to exp(-beta * dE) by Gumbel-max
-    sampling, while beta rises linearly to the end of cooling, beta_max in
-    the first repetition. For the tabu_tenure * n flips after a spin flips,
-    its dE is raised by tabu_lambda temperatures at the time of its flip (a
-    tabu). The first repetition starts from random spins at beta = 0; each
-    later one restarts from the best state so far, with beta ramping up from
-    u / (num_reps - 1) of its end, u being the number of restarts so far
-    that did not lower the best energy, so the restarts cool as they stop
-    paying. The end of cooling moves between repetitions: an anneal
-    whose last quarter still gained more than a tenth of what its third
-    quarter gained was still improving when it stopped, and the end of
-    cooling is found between such an end and twice it, the repetitions
-    alternating between the two and the pair moving towards the end whose
-    restarts gain more (see the README). After each repetition the best
-    state takes from the repetition's lowest states (one per half of its
-    flips) every cluster of spins that they have lower: the spins on which
-    two states differ fall into clusters not coupled to each other, and each
-    cluster is taken from the state where it costs less. Compiled to native
+    sampling, while beta rises. For the tabu_tenure * n flips after a spin
+    flips, its dE is raised by tabu_lambda temperatures at the time of its
+    flip (a tabu). The budget is num_steps, the total number of steps, and
+    the only number: everything else is read from the problem. A scan from a
+    random start cools in slices of eight sweeps, doubling beta every two
+    slices, and records at each doubling the weight mobility, the share of
+    the coupling weight (sum of |J| and |h| per spin) carried by the spins
+    that still move between slices; it ends two doublings after that share
+    has fallen under a tenth. Each restart then melts the best state so far
+    (one slice from beta = 0) and anneals again over the same range, its
+    slices shared among the doublings in proportion to the weight that froze
+    in each, so the time goes where the energy is decided and none to the
+    tail of light spins; the restart costs what the scan cost, and the budget
+    buys their number. After each anneal the best state takes from the
+    anneal's lowest states (one per half of its slices) every cluster of
+    spins that they have lower: the spins on which two states differ fall
+    into clusters not coupled to each other, and each cluster is taken from
+    the state where it costs less; the spins that still differ are annealed
+    again as a problem of their own (see the README). Compiled to native
     code on one core.
 
     The couplings are an array or a scipy.sparse matrix; the format does not
@@ -244,9 +244,10 @@ def run(
         sizes (np.ndarray, optional): For categorical problems, the number of values of each variable. Defaults to None.
         counts (np.ndarray, optional): For variables that exchange values, the number of variables at each value. Defaults to None.
         table (np.ndarray, optional): With counts, the q x q symmetric table between the values. Defaults to None.
-        beta_max (float): The end of cooling of the first repetition, in 1/energy; the later ones find their own. Defaults to 1.0.
-        num_steps (int): Steps per repetition, each flipping a spin or changing one variable's value. Defaults to 1000.
-        num_reps (int): Number of repetitions: the first from random spins, each further one from the best state so far, which takes the parts each repetition has lower; the end of cooling moves between them. Defaults to 1.
+        num_steps (int): The budget: steps in all, each flipping a spin or changing one variable's value, at least
+            sixteen per variable (one doubling of the scan). The scan takes what it needs and the rest buys restarts of
+            the scan's length; the re-anneals of the differing variables come on top, in proportion to their share.
+            Defaults to 1000.
         seed (int): Seed for the random number generator
         tabu_lambda (float): Tabu penalty on a just-flipped spin, in temperatures. Defaults to 3.0;
             rarely worth changing.
@@ -294,25 +295,21 @@ def run(
         if within:
             raise ValueError("Couplings between values of the same variable must be zero")
 
-    if beta_max <= 0.0:
-        raise ValueError("beta_max must be positive")
-    if num_steps <= 1:
-        raise ValueError("num_steps must be at least 2")
-    if num_reps <= 0:
-        raise ValueError("num_reps must be positive")
+    variables = len(sizes) if sizes is not None else couplings.shape[0]
+    if num_steps < K * W * variables:
+        raise ValueError(f"num_steps must be at least {K * W} per variable, one doubling of the scan")
     if tabu_lambda < 0.0:
         raise ValueError("tabu_lambda must be non-negative")
     if tabu_tenure < 0.0:
         raise ValueError("tabu_tenure must be non-negative")
     if counts is not None:
         fields = np.zeros((n, q)) if fields is None else np.ascontiguousarray(fields, dtype=np.float64)
-        return _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, seed, tabu_lambda,
-                         tabu_tenure)
+        return _run_swap(couplings, fields, counts, table, num_steps, seed, tabu_lambda, tabu_tenure)
     fields = np.zeros(couplings.shape[0]) if fields is None else np.ascontiguousarray(fields, dtype=np.float64)
     if sizes is not None:
-        return _run_categorical(couplings, fields, sizes, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure)
+        return _run_categorical(couplings, fields, sizes, num_steps, seed, tabu_lambda, tabu_tenure)
     form = _spin_form(couplings, len(fields))
-    return _run_spins(form, fields, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure)
+    return _run_spins(form, fields, num_steps, seed, tabu_lambda, tabu_tenure)
 
 
 def _sparse_is_faster(changed, size, spins):
@@ -393,148 +390,221 @@ def _fold_into(fold, energy, state, others):
         energy = lower
 
 
-def _improving(marks, late):
-    """Whether an anneal was still improving when it stopped: its last quarter lowered the second half's lowest state
-    (from marks[1], the lowest at three quarters, to late) by more than a tenth of what the third quarter did (from
-    marks[0], the energy at the half). A ratio, so the same test at every size and energy scale."""
-    return marks[1] - late > 0.1 * (marks[0] - marks[1])
+K = 2       # slices per doubling of beta in the scan
+W = 8       # sweeps per slice: a slice is W moves per variable, one kernel call
+STILL = 2   # doublings with under a tenth of the weight moving that end the scan
 
 
-def _repeat(anneal_at, fold, steps_for, everything, beta_max, num_steps, num_reps):
-    """The repetitions: the first from random values, each later one a restart from the best state so far, the lowest
-    states of each folded into the best state and the variables that still differ annealed again. anneal_at(end)
-    gives the anneal(S, x0, energy0, beta_start, steps) whose cooling ends at end, returning the states and whether it
-    was still improving at the end. Returns the best state.
+def _profile(walk_from, x0, scale, weight, budget):
+    """The scan: from a tenth of the scale, K slices per doubling of beta, recording at each doubling the weight
+    mobility, the share of the weight carried by the variables on which consecutive slices' lowest states differ, to
+    STILL doublings with under a tenth moving or the budget. Returns the cold edge of each doubling, the mobility, the
+    lowest state as (energy, state) and the steps used."""
+    walk = walk_from(x0)
+    w = walk.w
+    g = 2.0 ** (1.0 / K)
+    b = scale / 10.0
+    total = weight.sum()
+    lowest, x_low = walk.energy(), x0
+    betas, mob, used, still, last = [], [], 0, 0, None
+    while used + K * w <= budget and still < STILL:
+        low, moved = None, []
+        for _ in range(K):
+            e, st = walk.step(b, b * g)
+            b *= g
+            if last is not None:
+                moved.append(weight[st != last].sum() / total)
+            last = st.copy()
+            if low is None or e < low[0]:
+                low = (e, st)
+        used += K * w
+        if low[0] < lowest:
+            lowest, x_low = low
+        betas.append(b)
+        mob.append(float(np.mean(moved)) if moved else 0.5)
+        still = still + 1 if mob[-1] * 10 <= 1 else 0
+    return betas, mob, (lowest, x_low.copy()), used
 
-    The end of cooling moves between repetitions. Hotter by a factor two after an anneal that had frozen before its
-    end, until an anneal is seen still improving: that end is the colder one of a pair, the other twice it, and the
-    repetitions alternate between the two. Once both have been run as restarts, the pair moves one factor towards
-    the end whose restarts gained more; when that direction reverses, the best end lies within the pair, which
-    narrows (the factor to its square root) around the winner. An anneal still improving at the colder end moves
-    the pair colder before the gains have spoken."""
-    end, cold = beta_max, None     # the end of the next repetition; the colder end of the pair (None: no pair yet)
-    f, last_dir = 2.0, 0           # the factor between the ends of the pair; the direction of the pair's last move
-    gains = {}                     # per end of the pair, the gains of the restarts run at it since the pair last moved
-    stale = 0   # the restarts so far that did not lower the best energy: the first restart reheats to beta = 0
-    for rep in range(num_reps):
-        anneal = anneal_at(end)
-        if rep == 0:
-            states, improving = anneal(everything, None, None, 0.0, num_steps)
-        else:
-            states, improving = anneal(everything, x_best, energy, end * stale / (num_reps - 1), num_steps)
-            states.append((energy, x_best))
-        energy_new, x_best = _folded(fold, states)
-        energy_new, x_best = _reannealed(anneal, fold, steps_for, energy_new, x_best, states)
-        if rep > 0 and cold is not None and end in (cold, cold * f):
-            gains.setdefault(end, []).append(energy - energy_new)
-        stale += rep > 0 and not energy_new < energy
-        energy = energy_new
-        if cold is None:
-            cold, end = (end, end * f) if improving else (None, end / f)
-        elif gains.get(cold) and gains.get(cold * f) and np.mean(gains[cold]) != np.mean(gains[cold * f]):
-            colder = np.mean(gains[cold * f]) > np.mean(gains[cold])
-            if last_dir and colder != (last_dir > 0):   # a reversal: the best end lies within the pair
-                winner, f = cold * f if colder else cold, f ** 0.5
-                cold = winner / f ** 0.5
-            else:
-                cold = cold * f if colder else cold / f
-            last_dir, end = 1 if colder else -1, cold
-            gains.clear()
-        elif improving and end == cold * f:
-            cold = end
-            gains.clear()
-        else:
-            end = cold * f if end == cold else cold
+
+def _schedule(betas, mob, slices):
+    """The slices of an anneal over the scanned range shared among the doublings in proportion to the weight that
+    froze in each, the mobility's fall across it (the first doubling against a free walk's half), as (beta_from,
+    beta_to) per slice, geometric within a doubling. Doublings in which nothing froze get none; the melt slice from
+    beta = 0 to the first edge is not included."""
+    before = np.array([0.5] + mob[:-1])
+    freezing = np.maximum(0.0, before - np.array(mob))
+    if not freezing.sum() > 0.0:   # a scan too short to see anything freeze: the slices to its last doubling
+        freezing[-1] = 1.0
+    share = freezing / freezing.sum()
+    counts = np.floor(share * slices).astype(int)
+    for i in np.argsort(share * slices - counts)[::-1][: slices - counts.sum()]:   # the remainder to the largest fractions
+        counts[i] += 1
+    grid = []
+    for d, c in enumerate(counts):
+        if c:
+            edges = betas[d] / 2.0 * 2.0 ** (np.arange(c + 1) / c)
+            grid.extend(zip(edges[:-1], edges[1:]))
+    return grid
+
+
+def _restart(walk_from, x, grid):
+    """One anneal from x: a melt slice from beta = 0 to the grid's first edge, then the grid. The lowest states of
+    the two halves of its slices, as (energy, state), and the steps used."""
+    walk = walk_from(x)
+    lows = [walk.step(0.0, grid[0][0])] + [walk.step(b0, b1) for b0, b1 in grid]
+    k = len(lows)
+    states = [min(lows[: k // 2], key=lambda p: p[0]), min(lows[k // 2:], key=lambda p: p[0])]
+    return [(e, st.copy()) for e, st in states], k * walk.w
+
+
+def _solve(problem, budget, rng):
+    """The loop on a problem object (_Spins, _Cats, _Swap): the scan from a random start, then restarts of the scan's
+    length as long as the budget holds, each melted from the best state so far and annealed on the scan's schedule,
+    its lowest states folded into the best state and the variables that still differ annealed again. Returns the
+    best state as the kernels hold it."""
+    walk_from = lambda x: problem.walk(x, rng)
+    x0 = problem.start(rng)
+    betas, mob, (energy, x_best), L = _profile(walk_from, x0, problem.scale(x0), problem.weight, budget)
+    schedule = lambda slices: _schedule(betas, mob, slices)
+    grid = schedule(max(1, L // (W * problem.n) - 1))
+    anneal = lambda S, x, e, steps: problem.reanneal(S, x, e, schedule, grid[-1][1], steps, rng)
+    steps_for = problem.steps_for(L)
+    spent = L
+    while spent + L <= budget:
+        states, steps = _restart(walk_from, x_best, grid)
+        spent += steps
+        states.append((energy, x_best))
+        energy, x_best = _folded(problem.fold, states)
+        energy, x_best = _reannealed(anneal, problem.fold, steps_for, energy, x_best, states)
     return x_best
 
 
-def _run_spins(couplings, fields, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure):
-    """run() for spins, on validated input, with the couplings as _spin_form() returns them."""
-    n = len(fields)
+class _Slicer:
+    """A walk advanced a slice at a time: step(b0, b1) anneals one slice of W sweeps from beta b0 to b1 and returns
+    its lowest (energy, state) over all the variables; energy() the walk's current energy; w the steps of a slice."""
+
+    def __init__(self, step, energy, w):
+        self.step, self.energy, self.w = step, energy, w
+
+
+def _spin_weight(couplings, fields):
+    """A spin's weight, the energy it can move: the sum of |J| over its couplings plus |h|."""
     if isinstance(couplings, tuple):
-        row, col, data = couplings
-        ptr = np.concatenate(([0], np.cumsum(np.bincount(row, minlength=n)))).astype(np.int64)
-        fold = lambda a, b: _lib.pfa_fold_sparse_spin(ptr, col.astype(np.int32), data, fields, n, a, b)
-    else:
-        fold = lambda a, b: _lib.pfa_fold_spin(couplings, fields, n, a, b)
-    rng = np.random.default_rng(seed)
-    anneal_at = lambda end: (lambda S, s0, energy0, beta_start, steps: _anneal_spins(
-        couplings, fields, S, s0, energy0, beta_start, end, steps, rng, tabu_lambda, tabu_tenure))
-    steps_for = lambda S, x: max(1, num_steps * len(S) // n)
-    return _repeat(anneal_at, fold, steps_for, np.arange(n), beta_max, num_steps, num_reps).astype(np.int8)
+        row, _, data = couplings
+        return np.bincount(row, weights=np.abs(data), minlength=len(fields)) + np.abs(fields)
+    return np.abs(couplings).sum(axis=1) + np.abs(fields)
 
 
-def _anneal_spins(couplings, fields, S, s0, energy0, beta_start, beta_max, num_steps, rng, tabu_lambda, tabu_tenure):
-    """One anneal of the spins S, the others fixed as in s0 and their couplings folded into the fields, from s0 on S
-    (random spins when s0 is None) with energy0 the energy of s0: the lowest state of the first half of the steps and
-    the lowest of the second half, as (energy, state) pairs over all the spins, and whether the walk was still
-    improving at the end. couplings as _spin_form() returns them; the sub-problem's kernel is chosen again."""
-    n, m = len(fields), len(S)
-    if m < n:
-        T = np.setdiff1d(np.arange(n), S, assume_unique=True)
-        if isinstance(couplings, tuple):
+class _Spins:
+    """A spin problem as the loop reads it, the couplings as _spin_form() returns them."""
+
+    def __init__(self, couplings, fields, tabu_lambda, tabu_tenure):
+        self.n = n = len(fields)
+        self.couplings, self.fields = couplings, fields
+        self.sparse = isinstance(couplings, tuple)
+        if self.sparse:
             row, col, data = couplings
+            ptr = np.concatenate(([0], np.cumsum(np.bincount(row, minlength=n)))).astype(np.int64)
+            self.stored = (ptr, col.astype(np.int32), data)
+            self.fold = lambda a, b: _lib.pfa_fold_sparse_spin(*self.stored, fields, n, a, b)
+        else:
+            self.fold = lambda a, b: _lib.pfa_fold_spin(couplings, fields, n, a, b)
+        self.weight = _spin_weight(couplings, fields)
+        self.lam, self.tenure = tabu_lambda, int(tabu_tenure * n)
+
+    def start(self, rng):
+        return (2.0 * rng.integers(0, 2, self.n) - 1.0).astype(np.float32)
+
+    def half_fields(self, spins):
+        """(fields + couplings @ spins) / 2 as the spin kernels keep it, and the energy."""
+        spins = spins.astype(np.float64)
+        if self.sparse:
+            row, col, data = self.couplings
+            coupled = np.bincount(row, weights=data * spins[col], minlength=self.n)
+        else:
+            coupled = self.couplings @ spins
+        return 0.5 * (self.fields + coupled), 0.5 * spins @ coupled + self.fields @ spins
+
+    def scale(self, spins):
+        """The beta scale of a state: one over the mean |dE| of a flip."""
+        phi, _ = self.half_fields(spins)
+        return 1.0 / np.mean(4.0 * np.abs(phi))
+
+    def walk(self, spins, rng):
+        n, w = self.n, W * self.n
+        phi, energy = self.half_fields(spins)
+        energy_c = ctypes.c_double(energy)
+        s = spins.astype(np.float32)
+
+        def step(b0, b1):
+            # the kernels' contract: the first half's lowest starts as the state and energy the slice starts from
+            first_c, late_c, marks = ctypes.c_double(energy_c.value), ctypes.c_double(), np.empty(2)
+            s_first, s_late = s.copy(), np.empty(n, dtype=np.float32)
+            args = (ctypes.byref(energy_c), ctypes.byref(first_c), s_first, ctypes.byref(late_c), s_late, marks,
+                    int(rng.integers(1, 2**63)), self.lam, self.tenure)
+            if self.sparse:
+                _lib.pfa_anneal_sparse_spin(*self.stored, phi, s, n, w, b0, b1, *args)
+            else:
+                noise_vec = -np.log(-np.log(rng.random(n)))
+                noise = np.concatenate((noise_vec, noise_vec)).astype(np.float32)
+                first = int(np.argmax(4.0 * b0 * s.astype(np.float64) * phi + noise_vec))
+                _lib.pfa_anneal_spin(self.couplings, phi, s, noise, n, w, b0, b1, first, *args)
+            return (first_c.value, s_first) if first_c.value <= late_c.value else (late_c.value, s_late)
+
+        return _Slicer(step, lambda: energy_c.value, w)
+
+    def sub(self, S, x):
+        """The spins S as a problem of their own, the others fixed as in x and their couplings folded into the fields;
+        the kernel is chosen again."""
+        n, m = self.n, len(S)
+        if self.sparse:
+            row, col, data = self.couplings
             at = np.full(n, -1)
             at[S] = np.arange(m)
             in_row, in_col = at[row] >= 0, at[col] >= 0
             keep, out = in_row & in_col, in_row & ~in_col
             sub = (at[row[keep]], at[col[keep]], data[keep])
-            fixed = np.bincount(at[row[out]], weights=data[out] * s0[col[out]], minlength=m)
+            fixed = np.bincount(at[row[out]], weights=data[out] * x[col[out]].astype(np.float64), minlength=m)
         else:
-            sub = np.ascontiguousarray(couplings[np.ix_(S, S)])
-            fixed = couplings[np.ix_(S, T)] @ s0[T].astype(np.float64)
-        couplings, fields = _spin_form(sub, m), np.ascontiguousarray(fields[S] + fixed)
-    sparse = isinstance(couplings, tuple)
-    if sparse:
-        row, col, data = couplings
-        ptr = np.concatenate(([0], np.cumsum(np.bincount(row, minlength=m))))
-        stored = (ptr.astype(np.int64), col.astype(np.int32), data)
-    tenure = int(tabu_tenure * m)
-    if s0 is None:
-        spins = 2.0 * rng.integers(0, 2, m).astype(np.float64) - 1.0
-    else:
-        spins = s0[S].astype(np.float64)
-    if sparse:
-        coupled = np.bincount(row, weights=data * spins[col], minlength=m)   # couplings @ spins
-    else:
-        coupled = couplings @ spins
-    energy = 0.5 * spins @ coupled + fields @ spins
-    offset = 0.0 if energy0 is None else energy0 - energy       # the energy of the fixed spins
-    half_fields = 0.5 * (fields + coupled)
-    spins_f32 = spins.astype(np.float32)
-    spins_first, spins_late = spins_f32.copy(), np.empty(m, dtype=np.float32)
-    energy_c = ctypes.c_double(energy)
-    first_c, late_c = ctypes.c_double(energy), ctypes.c_double()
-    lowest = ctypes.byref(first_c), spins_first, ctypes.byref(late_c), spins_late
-    marks = np.empty(2)   # the energy at the half and the second half's lowest at three quarters
-    if sparse:
-        _lib.pfa_anneal_sparse_spin(
-            *stored, half_fields, spins_f32, m, num_steps, beta_start, beta_max, ctypes.byref(energy_c),
-            *lowest, marks, int(rng.integers(1, 2**63)), tabu_lambda, tenure,
-        )
-    else:
-        noise_vec = -np.log(-np.log(rng.random(m)))
-        noise_buffer = np.concatenate((noise_vec, noise_vec)).astype(np.float32)
-        offsets_seed = int(rng.integers(1, 2**63))
-        # first pick at beta_start: argmax_j(-beta_start * dE_j + noise_j), with dE_j = -4 s_j phi_j
-        first = int(np.argmax(4.0 * beta_start * spins * half_fields + noise_vec))
-        _lib.pfa_anneal_spin(
-            couplings, half_fields, spins_f32, noise_buffer, m, num_steps, beta_start, beta_max, first,
-            ctypes.byref(energy_c), *lowest, marks, offsets_seed, tabu_lambda, tenure,
-        )
-    states = []
-    for value, part in ((first_c.value, spins_first), (late_c.value, spins_late)):
-        s = s0.copy() if s0 is not None else np.empty(n, dtype=np.float32)
-        s[S] = part
-        states.append((value + offset, s))
-    return states, _improving(marks, late_c.value)
+            T = np.setdiff1d(np.arange(n), S, assume_unique=True)
+            sub = np.ascontiguousarray(self.couplings[np.ix_(S, S)])
+            fixed = self.couplings[np.ix_(S, T)] @ x[T].astype(np.float64)
+        return _Spins(_spin_form(sub, m), np.ascontiguousarray(self.fields[S] + fixed), self.lam, self.tenure / n)
+
+    def reanneal(self, S, x, energy, schedule, cold, steps, rng):
+        """The spins S annealed again on the scan's schedule with the slices steps affords: a melt slice then the
+        grid, on the sub-problem. The two halves' lowest states over all the spins."""
+        part = self.sub(S, x)
+        walk = part.walk(x[S], rng)
+        offset = energy - walk.energy()   # the fixed spins' energy
+        sub_grid = schedule(max(1, steps // walk.w - 1))
+        lows = [walk.step(0.0, sub_grid[0][0])] + [walk.step(a, b) for a, b in sub_grid]
+        k = len(lows)
+        states = []
+        for e, found in (min(lows[: k // 2], key=lambda p: p[0]), min(lows[k // 2:], key=lambda p: p[0])):
+            s = x.copy()
+            s[S] = found
+            states.append((e + offset, s))
+        return states
+
+    def steps_for(self, L):
+        return lambda S, x: max(1, L * len(S) // self.n)
+
+    def values(self, x):
+        return x.astype(np.int8)
 
 
-def _run_categorical(couplings, fields, sizes, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure):
+def _run_spins(couplings, fields, num_steps, seed, tabu_lambda, tabu_tenure):
+    """run() for spins, on validated input, with the couplings as _spin_form() returns them."""
+    problem = _Spins(couplings, fields, tabu_lambda, tabu_tenure)
+    return problem.values(_solve(problem, num_steps, np.random.default_rng(seed)))
+
+
+def _run_categorical(couplings, fields, sizes, num_steps, seed, tabu_lambda, tabu_tenure):
     """run() for categorical problems, on validated input (couplings as an array or a scipy.sparse CSR matrix).
     Variables with one value never move and are left out, and so are the values that elimination removes."""
     multi = sizes > 1
-    args = beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure
+    args = num_steps, seed, tabu_lambda, tabu_tenure
     x = np.zeros(len(sizes), dtype=np.int64)
     if not multi.any():
         return x
@@ -682,9 +752,9 @@ def _reduced(form, fields, alive):
     return out, out_fields, count, value
 
 
-def _anneal_categorical(form, fields, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure):
+def _anneal_categorical(form, fields, num_steps, seed, tabu_lambda, tabu_tenure):
     """The anneal of a categorical problem in the form of _Form: the value of each variable, 0 for its value 0."""
-    starts, grp, sparse, couplings = form.starts, form.grp, form.sparse, form.couplings
+    starts, couplings = form.starts, form.couplings
     V, m = len(starts) - 1, int(starts[-1])
     sizes = np.diff(starts) + 1
 
@@ -693,20 +763,91 @@ def _anneal_categorical(form, fields, beta_max, num_steps, num_reps, seed, tabu_
 
     if np.all(sizes == 2):
         # x = (s + 1) / 2: the spin problem with couplings C and fields 2 f + C 1 has 4 times the energy (plus a
-        # constant), so it runs at beta / 4
+        # constant); the scale is read, so the factor plays no part
         spin = _spin_form(couplings, m)
         sums = np.bincount(spin[0], weights=spin[2], minlength=m) if isinstance(spin, tuple) else spin.sum(axis=1)
-        spins = _run_spins(spin, 2.0 * fields + sums, beta_max / 4.0, num_steps, num_reps, seed, tabu_lambda,
-                           tabu_tenure)
+        spins = _run_spins(spin, 2.0 * fields + sums, num_steps, seed, tabu_lambda, tabu_tenure)
         return values(np.where(spins > 0, np.arange(V), -1))
 
-    rng = np.random.default_rng(seed)
-    fields = np.ascontiguousarray(fields, dtype=np.float64)
-    fold = lambda a, b: _lib.pfa_fold_categorical(*form.lines, fields, a, b)
-    anneal_at = lambda end: (lambda S, cur0, energy0, beta_start, steps: _anneal_cat(
-        form, fields, S, cur0, energy0, beta_start, end, steps, rng, tabu_lambda, tabu_tenure))
-    steps_for = lambda S, x: max(1, num_steps * len(S) // V)
-    return values(_repeat(anneal_at, fold, steps_for, np.arange(V), beta_max, num_steps, num_reps))
+    problem = _Cats(form, np.ascontiguousarray(fields, dtype=np.float64), tabu_lambda, tabu_tenure)
+    return values(_solve(problem, num_steps, np.random.default_rng(seed)))
+
+
+class _Cats:
+    """A categorical problem as the loop reads it, in the form of _Form (every variable with more than one value, the
+    eliminated values gone); a state is the current row of each variable, -1 at value 0, as the kernels hold it."""
+
+    def __init__(self, form, fields, tabu_lambda, tabu_tenure):
+        self.form, self.fields = form, fields
+        self.starts, self.grp = form.starts, form.grp
+        self.n = V = len(self.starts) - 1
+        self.m = int(self.starts[-1])
+        self.sizes = np.diff(self.starts) + 1
+        if form.sparse:
+            first, _, vptr, adj, _, rows, _, vals = form.lines
+            self.stored = first, vptr, adj, rows, vals
+            row, _, data = form.couplings
+            per_row = np.bincount(row, weights=np.abs(data), minlength=self.m)
+        else:
+            per_row = np.abs(form.couplings).sum(axis=1)
+        # a variable's weight, the energy it can move: the sum over its rows of their |couplings| and |field|
+        self.weight = np.bincount(self.grp, weights=per_row + np.abs(fields), minlength=V)
+        self.fold = lambda a, b: _lib.pfa_fold_categorical(*form.lines, fields, a, b)
+        self.lam, self.tenure = tabu_lambda, int(tabu_tenure * V)
+
+    def start(self, rng):
+        v = (rng.random(self.n) * self.sizes).astype(np.int64)   # a uniformly random value per variable
+        return np.where(v == 0, -1, self.starts[:-1] + v - 1).astype(np.int32)
+
+    def fields_of(self, cur):
+        """The fields plus the couplings to the current values, and the energy."""
+        on = cur[cur >= 0]
+        if self.form.sparse:
+            row, col, data = self.form.couplings
+            taken = np.zeros(self.m, dtype=bool)
+            taken[on] = True
+            sel = taken[row]
+            return (self.fields + np.bincount(col[sel], weights=data[sel], minlength=self.m),
+                    self.fields[on].sum() + 0.5 * data[sel & taken[col]].sum())
+        C = self.form.couplings
+        return self.fields + C[:, on].sum(axis=1), self.fields[on].sum() + 0.5 * C[np.ix_(on, on)].sum()
+
+    def scale(self, cur):
+        """The beta scale of a state: one over the mean |dE| of a change of value."""
+        F, _ = self.fields_of(cur)
+        at = np.where(cur >= 0, F[np.maximum(cur, 0)], 0.0)      # the field of each variable's current value
+        de = np.concatenate((F - at[self.grp], -at[cur >= 0]))   # to every other row, and to value 0
+        de = np.abs(de[de != 0.0])
+        return 1.0 / de.mean()
+
+    def walk(self, cur, rng):
+        V, m, w = self.n, self.m, W * self.n
+        cur = cur.copy()
+        F, energy = self.fields_of(cur)
+        F = np.ascontiguousarray(F)
+        energy_c = ctypes.c_double(energy)
+
+        def step(b0, b1):
+            first_c, late_c, marks = ctypes.c_double(energy_c.value), ctypes.c_double(), np.empty(2)
+            c_first, c_late = cur.copy(), np.empty(V, dtype=np.int32)
+            args = (ctypes.byref(energy_c), ctypes.byref(first_c), c_first, ctypes.byref(late_c), c_late, marks,
+                    int(rng.integers(1, 2**63)), self.lam, self.tenure)
+            if self.form.sparse:
+                _lib.pfa_anneal_sparse_categorical(*self.stored, F, m, V, cur, w, b0, b1, *args)
+            else:
+                noise_vec = -np.log(-np.log(rng.random(m)))
+                noise = np.concatenate((noise_vec, noise_vec)).astype(np.float32)
+                _lib.pfa_anneal_categorical(self.form.couplings, F, m, V, self.grp, cur, noise, w, b0, b1, *args)
+            return (first_c.value, c_first) if first_c.value <= late_c.value else (late_c.value, c_late)
+
+        return _Slicer(step, lambda: energy_c.value, w)
+
+    def reanneal(self, S, x, energy, schedule, cold, steps, rng):
+        """The variables S annealed again from random values, linear from beta = 0 to the schedule's cold end."""
+        return _anneal_cat(self.form, self.fields, S, x, energy, 0.0, cold, steps, rng, self.lam, self.tenure / self.n)
+
+    def steps_for(self, L):
+        return lambda S, x: max(1, L * len(S) // self.n)
 
 
 def _anneal_cat(form, fields, S, cur0, energy0, beta_start, beta_max, num_steps, rng, tabu_lambda, tabu_tenure):
@@ -787,7 +928,7 @@ def _anneal_cat(form, fields, S, cur0, energy0, beta_start, beta_max, num_steps,
         else:
             whole = found
         states.append((value + offset, whole))
-    return states, _improving(marks, late_c.value)
+    return states
 
 
 def _sparse_swap_is_faster(d, n, q, pairs):
@@ -798,21 +939,117 @@ def _sparse_swap_is_faster(d, n, q, pairs):
     return (2 * d + 2) * (120e-9 * (q - 1) + 18e-9 * d) < 0.32e-9 * pairs + 0.17e-9 * n * q + 10e-9 * n
 
 
-def _run_swap(couplings, fields, counts, table, beta_max, num_steps, num_reps, seed, tabu_lambda, tabu_tenure):
+def _run_swap(couplings, fields, counts, table, num_steps, seed, tabu_lambda, tabu_tenure):
     """run() with counts, on validated input: the value of each variable."""
     n = len(fields)
     if np.count_nonzero(counts) < 2:                            # one value: nothing moves
         return np.full(n, np.flatnonzero(counts)[0], dtype=np.int64)
     A = couplings if isinstance(couplings, np.ndarray) else couplings.tocsr()
-    A_fold = _array(A, n)                                        # the fold reads the array
-    fold = lambda a, b: _lib.pfa_fold_swap(A_fold, table, fields, n, len(counts), a, b)
-    rng = np.random.default_rng(seed)
-    anneal_at = lambda end: (lambda S, x0, energy0, beta_start, steps: _anneal_swap(
-        A, table, fields, counts, S, x0, energy0, beta_start, end, steps, rng, tabu_lambda, tabu_tenure))
-    pairs = _pairs(counts)
-    # the steps of a re-anneal: in proportion to the pairs of S at different values, read from the state annealed
-    steps_for = lambda S, x: max(1, num_steps * _pairs(np.bincount(x[S], minlength=len(counts))) // pairs)
-    return _repeat(anneal_at, fold, steps_for, np.arange(n), beta_max, num_steps, num_reps).astype(np.int64)
+    problem = _Swap(A, table, fields, counts, tabu_lambda, tabu_tenure)
+    return _solve(problem, num_steps, np.random.default_rng(seed)).astype(np.int64)
+
+
+class _Swap:
+    """Variables that exchange values, as the loop reads them; a state is the value of each variable."""
+
+    def __init__(self, A, table, fields, counts, tabu_lambda, tabu_tenure):
+        self.n = n = len(fields)
+        self.q = len(counts)
+        self.A, self.table, self.fields, self.counts = A, table, fields, counts
+        A_fold = _array(A, n)                                   # the fold reads the array
+        self.fold = lambda a, b: _lib.pfa_fold_swap(A_fold, table, fields, n, self.q, a, b)
+        row_sums = np.asarray(np.abs(A).sum(axis=1)).ravel()
+        self.weight = row_sums + np.abs(fields).mean(axis=1)   # a variable's weight: its |couplings| plus its mean |field|
+        self.kappa = 2.0 * table - np.diag(table)[:, None] - np.diag(table)[None, :]
+        self.pairs = _pairs(counts)
+        self.lam, self.tabu_tenure = tabu_lambda, tabu_tenure
+
+    def start(self, rng):
+        return np.repeat(np.arange(self.q), self.counts)[rng.permutation(self.n)].astype(np.int32)
+
+    def fields_of(self, x):
+        """F[r, k] = f_r(k) + sum_s A_rs table(k, x_s), and the energy."""
+        F = np.ascontiguousarray(self.fields + self.A @ self.table[x])
+        rows = np.arange(self.n)
+        return F, float(self.fields[rows, x].sum() + 0.5 * (F[rows, x] - self.fields[rows, x]).sum())
+
+    def scale(self, x):
+        """The beta scale of a state: one over the mean |dE| of an exchange, over the pairs at different values or a
+        sample of them."""
+        F, _ = self.fields_of(x)
+        n = self.n
+        if self.pairs <= 2_000_000:
+            r, s = np.triu_indices(n, 1)
+        else:
+            rng = np.random.default_rng(0)
+            r, s = rng.integers(0, n, 2_000_000), rng.integers(0, n, 2_000_000)
+        a, b = x[r], x[s]
+        keep = a != b
+        r, s, a, b = r[keep], s[keep], a[keep], b[keep]
+        A_rs = self.A[r, s] if isinstance(self.A, np.ndarray) else np.asarray(self.A[r, s]).ravel()
+        de = (F[r, b] - F[r, a]) + (F[s, a] - F[s, b]) + A_rs * self.kappa[a, b]
+        de = np.abs(de[de != 0.0])
+        return 1.0 / de.mean()
+
+    def walk(self, x, rng):
+        """A walk from x advanced a slice of W sweeps at a time, on the kernel chosen for the problem; the slice's
+        lowest state is returned as the value of each variable."""
+        n, q, w = self.n, self.q, W * self.n
+        counts, A, table = self.counts, self.A, self.table
+        order = np.argsort(counts, kind="stable")                # the values by count, the largest last
+        order = order[counts[order] > 0]
+        block = np.empty(q, dtype=np.int64)
+        block[order] = np.arange(len(order))
+        sizes = counts[order]
+        val = np.repeat(order, sizes).astype(np.int32)          # value of each position
+        e = np.repeat(np.cumsum(sizes), sizes).astype(np.int32)
+        pairs = int(np.sum(n - e))
+        sparse = _sparse_swap_is_faster(_count(A) / n, n, q, pairs)
+        if sparse:
+            row, col, data = _entries(A)
+            ptr = np.concatenate(([0], np.cumsum(np.bincount(row, minlength=n)))).astype(np.int64)
+            key = np.minimum(row, col).astype(np.int64) * n + np.maximum(row, col)
+            uniq, pid = np.unique(key, return_inverse=True)
+            stored = (ptr, col.astype(np.int32), data, pid.astype(np.int32), len(uniq), (uniq // n).astype(np.int32),
+                      (uniq % n).astype(np.int32))
+        else:
+            A_arr = _array(A, n)
+            rs = np.concatenate(([0], np.cumsum((n - e + 63) // 64 * 64))).astype(np.int64)
+            P = int(rs[-1])
+            D = np.empty(P)
+        tenure = np.zeros(q, dtype=np.int64)
+        tenure[order] = (self.tabu_tenure * pairs / (n - sizes)).astype(np.int64)
+        pos = np.argsort(block[x], kind="stable").astype(np.int32)   # the variables by block of their value
+        F, energy = self.fields_of(x)
+        energy_c = ctypes.c_double(energy)
+
+        def step(b0, b1):
+            first_c, late_c, marks = ctypes.c_double(energy_c.value), ctypes.c_double(), np.empty(2)
+            p_first, p_late = pos.copy(), np.empty(n, dtype=np.int32)
+            args = (ctypes.byref(energy_c), ctypes.byref(first_c), p_first, ctypes.byref(late_c), p_late, marks,
+                    int(rng.integers(1, 2**63)), self.lam, tenure)
+            if sparse:
+                _lib.pfa_anneal_sparse_swap(*stored, table, n, q, val, pos, F, w, b0, b1, *args)
+            else:
+                noise_vec = -np.log(-np.log(rng.random(P)))
+                noise = np.concatenate((noise_vec, noise_vec)).astype(np.float32)
+                _lib.pfa_anneal_swap(A_arr, table, n, q, val, e, rs, pos, F, D, noise, w, b0, b1, *args)
+            value, p = (first_c.value, p_first) if first_c.value <= late_c.value else (late_c.value, p_late)
+            y = np.empty(n, dtype=np.int32)
+            y[p] = val
+            return value, y
+
+        return _Slicer(step, lambda: energy_c.value, w)
+
+    def reanneal(self, S, x, energy, schedule, cold, steps, rng):
+        """The variables S annealed again from random values with their counts, linear from beta = 0 to the
+        schedule's cold end."""
+        return _anneal_swap(self.A, self.table, self.fields, self.counts, S, x, energy, 0.0, cold, steps, rng,
+                            self.lam, self.tabu_tenure)
+
+    def steps_for(self, L):
+        # the steps of a re-anneal: in proportion to the pairs of S at different values, read from the state annealed
+        return lambda S, x: max(1, L * _pairs(np.bincount(x[S], minlength=self.q)) // self.pairs)
 
 
 def _reannealed(anneal, fold, steps_for, energy, x, states):
@@ -827,7 +1064,7 @@ def _reannealed(anneal, fold, steps_for, energy, x, states):
         S = np.flatnonzero(x != pool.pop())
         if len(S) == 0 or len(S) == len(x):   # nothing differs, or nothing is shared
             continue
-        found = [y for _, y in anneal(S, x, energy, 0.0, steps_for(S, x))[0]]
+        found = [y for _, y in anneal(S, x, energy, steps_for(S, x))]
         lower = _fold_into(fold, energy, x, found)
         if lower < energy:
             pool.extend(found)
@@ -918,7 +1155,7 @@ def _anneal_swap(A, table, fields, counts, S, x0, energy0, beta_start, beta_max,
         x = x0.copy() if x0 is not None else np.empty(n, dtype=np.int32)
         x[S[p]] = val
         states.append((value + offset, x))
-    return states, _improving(marks, late_c.value)
+    return states
 
 
 def _one_hot_layout(groups):

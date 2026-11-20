@@ -18,6 +18,6 @@ distance = np.sqrt(((points[:, None] - points[None]) ** 2).sum(axis=2))
 hidden = rng.permutation(n)
 flow = -distance[np.ix_(hidden, hidden)]   # flow[r, s] = -distance[hidden[r], hidden[s]]
 
-x = pfa.run(flow, counts=np.ones(n, dtype=int), table=distance, beta_max=20.0, num_steps=20 * n * n, num_reps=10)
+x = pfa.run(flow, counts=np.ones(n, dtype=int), table=distance, num_steps=200 * n * n)
 energy = 0.5 * (flow * distance[np.ix_(x, x)]).sum()
 print(f"{n} facilities: energy {energy:.4f}, planted optimum {-0.5 * (distance**2).sum():.4f}")
