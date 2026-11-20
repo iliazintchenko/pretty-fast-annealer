@@ -109,9 +109,9 @@ W_r = Σ_s |T_rs| + |f_r|        (spins: Σ_s |J_rs| + |h_r|; exchanges: Σ_s |A
 ```
 
 and the scan records at every doubling the **weight mobility**, the share of the total weight carried by the
-variables that still moved. The spins that flicker late are a fifth of the count and a fiftieth of the weight. On a
-problem whose late movers are heavy, frustrated variables with full-weight couplings whose fields cancel, weight and
-count agree, and the tail is kept. The scan ends two doublings after the weight mobility has fallen under a tenth,
+variables that still moved. On such a glass the spins that flicker late are a large share of the count and a small
+share of the weight. On a problem whose late movers are heavy, frustrated variables with full-weight couplings whose
+fields cancel, weight and count agree, and the tail is kept. The scan ends two doublings after the weight mobility has fallen under a tenth,
 whatever the budget. Where the weight is homogeneous, the weight mobility is the count mobility, and nothing changes.
 
 **The schedule.** The fall of the weight mobility across a doubling is the weight that froze in it. Every anneal
@@ -131,20 +131,20 @@ relaxation time can be read from it.
 melts it in one slice from β = 0 to the hot edge of the range, and anneals on the schedule. Melting fully beats every
 partial reheat: a restart's descent is not gain on the best state until its last slices, and a reheat to the typical
 field already half-melts the best state, whose fields are two to three times the random start's. A restart costs what
-the scan cost, one pass over the freezing range at the scan's resolution, and the budget buys their number: a budget
-of ten passes buys a few restarts, a budget of a hundred buys fifty or more. After every anneal its two lowest states fold into
-the best state and the variables that still differ are annealed again (see Recombination). The restarts' length is
-the one lever the problem does not read: classes whose restarts agree with each other on most variables want fewer,
-longer ones, and classes whose restarts are independent samples want many short ones, by a factor of two at most in
-the final gap, and nothing in the scan or in the fold separates them.
+the scan cost, one pass over the freezing range at the scan's resolution, and the budget buys their number and pays
+for the re-anneals after them in the same steps: a budget of ten passes buys a few restarts, a budget of a hundred
+buys fifty or more. After every anneal its two lowest states fold into the best state and the variables that still
+differ are annealed again (see Recombination).
 
-Against the loop before it, fixed-length repetitions from `beta_max` with the end of cooling moved between them by
-their outcomes, at the same budget on the same problems: on dense and sparse spin glasses, MAX-2-SAT, side-chain
-packing, colouring and tours the loop ties or wins at a budget of thirty passes and wins on every class at a hundred,
-by two to three times on the glasses, with the lowest energy ever seen reached in every seed on the dense glass; on
-quadratic assignment the structured instances, distances on a grid or structured flows, reach the best known values
-in every seed at every budget where the old loop did not, and the random instances trail it by a third, the length
-lever. At a budget of ten passes the scan is most of it and the loop ties the old one.
+**The restarts' length** is the one lever the problem does not read. It is a property of the landscape, not of the
+budget. Where the fold compounds, where most restarts improve the best state through the fold and the re-anneal, a
+restart only has to produce a state worth folding, and the shortest restarts win. Where the fold never improves the
+best state, because two low states share nothing it can align, the loop is independent anneals and a best-of, only a
+restart that beats the best outright lowers it, and the longer the restart the better. Nothing in the scan separates
+the two kinds, and the one signal that does, whether the fold takes, is absent by construction on dense couplings as
+well as on the classes that want long restarts, so a rule that lengthens the restarts on its absence runs away on
+dense problems with the count collapsing as the budget grows. The length stays at the scan's: a bounded loss on the
+classes that want long restarts against an unbounded one on the dense ones.
 
 **Elimination.** Before the anneal, the problem loses the values that no optimum needs. Value a of variable r is
 removed when another value b of r has
@@ -575,7 +575,7 @@ each variable (int64). Its parameters:
 | `sizes` | the number of values of each variable | `None` (spins) | Variable r takes a value in 0 … `sizes[r]` − 1. Each value other than 0 has a row and column of `couplings` and an entry of `fields`, ordered by variable (variable 0's values 1 … `sizes[0]` − 1 first), so n = Σ (`sizes[r]` − 1). The energy is the fields of the values taken plus each coupling between two of them once: ½ xᵀ C x + fᵀ x with x_k = 1 for the values taken. Couplings between values of the same variable must be zero. Values that no optimum needs are removed first (see Elimination). |
 | `counts` | the number of variables at each of q values, summing to n | `None` | Variable r takes a value in 0 … q − 1, and `counts[v]` variables are at value v throughout (see Exchanges). The energy is Σ_r `fields[r, x_r]` + Σ_{r<s} `couplings[r, s]` · `table[x_r, x_s]`. k of n: `counts` (n − k, k) with `table` [[0, 0], [0, 1]]; parts of given sizes: `table` 1 − I to count the edges between parts; a permutation: `counts` all 1, `table` the distances. |
 | `table` | with `counts`, the q × q symmetric table between the values | required with `counts` | |
-| `num_steps` | the budget: steps in all, each one move | `1000` | On the array kernels num_steps · n field updates, or num_steps / V moves per variable. At least 16 per variable, one doubling of the scan. The scan takes what it needs, a few hundred moves per variable on most problems and more where the variables freeze over many decades of β, and the rest buys restarts of the scan's length (see The budget); the re-anneals of the differing variables come on top, in proportion to their share of the moves. More budget buys more restarts, and the energy keeps falling with it. |
+| `num_steps` | the budget: steps in all, each one move | `1000` | On the array kernels num_steps · n field updates, or num_steps / V moves per variable. At least 16 per variable, one doubling of the scan. The scan takes what it needs, a few hundred moves per variable on most problems and more where the variables freeze over many decades of β, and the rest buys restarts of the scan's length and the re-anneals of the differing variables after each, all in the same currency (see The budget). More budget buys more restarts, and the energy keeps falling with it. |
 | `seed` | random seed | `42` | Sets the scan's starting state and every slice's Gumbel noise vector and offsets, or on the sparse kernels its draws, so results are reproducible. |
 | `tabu_lambda` | the tabu penalty λ, in temperatures | `3.0` | Divides the weight of a variable's moves by e^λ just after it moved (see Tabu). Rarely worth changing. |
 | `tabu_tenure` | the tabu tenure, as a fraction of the number of variables V | `0.25` | A variable stays tabu for `tabu_tenure` · V steps; with `counts`, its return to the value it left is tabu for `tabu_tenure` times the mean number of steps between two moves of a variable at that value. 0 turns the tabu off. Rarely worth changing. |

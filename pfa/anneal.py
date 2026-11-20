@@ -472,10 +472,10 @@ def _solve(problem, budget, rng):
     spent = L
     while spent + L <= budget:
         states, steps = _restart(walk_from, x_best, grid)
-        spent += steps
         states.append((energy, x_best))
         energy, x_best = _folded(problem.fold, states)
-        energy, x_best = _reannealed(anneal, problem.fold, steps_for, energy, x_best, states)
+        energy, x_best, re_steps = _reannealed(anneal, problem.fold, steps_for, energy, x_best, states)
+        spent += steps + re_steps   # the re-anneals are paid for in the same currency
     return x_best
 
 
@@ -1058,18 +1058,21 @@ def _reannealed(anneal, fold, steps_for, energy, x, states):
     What the anneal finds folds into x (by the fold's rule, so that a state the anneal reports a rounding lower is
     not a gain), and when that lowers x the two states of the anneal join the states to go round again, until no
     anneal brings anything. (On dense couplings the differing variables form one cluster, which the fold cannot
-    take.)"""
+    take.) Returns the energy, x and the steps the anneals took."""
     pool = [y for _, y in states if y is not x]
+    spent = 0
     while pool:
         S = np.flatnonzero(x != pool.pop())
         if len(S) == 0 or len(S) == len(x):   # nothing differs, or nothing is shared
             continue
-        found = [y for _, y in anneal(S, x, energy, steps_for(S, x))]
+        steps = steps_for(S, x)
+        spent += steps
+        found = [y for _, y in anneal(S, x, energy, steps)]
         lower = _fold_into(fold, energy, x, found)
         if lower < energy:
             pool.extend(found)
             energy = lower
-    return energy, x
+    return energy, x, spent
 
 
 def _pairs(counts):
