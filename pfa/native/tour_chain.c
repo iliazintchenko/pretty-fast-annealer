@@ -8,12 +8,18 @@
 // add (f, t3) for a candidate t3 of f, remove either tour edge (t3, t4) at t3, including the one that leaves a cycle
 // and a path until the next exchange repairs it, and so on, as long as the open path stays shorter than the start
 // tour (the gain criterion); each one that closes to a tour is an option with the exact change of the tour's length.
-// An option that leaves the tour shorter than at the chain's start is applied and the chain ends. Otherwise the
-// option whose open path is shortest is applied and the chain goes on from its tip; else the chain's exchanges are
-// undone. An edge the chain added may not be removed, and only edges of the tour the chain started from may be
-// removed, which keeps a chain from undoing itself. depth 4 gives the 5-opt basis. The gains are read on the
-// penalised distances of the ascent (every tour changes by the same constant, so the choices change and the lengths
-// do not), as in LKH.
+// The first option met that leaves the tour shorter than at the chain's start is applied and the chain ends.
+// Otherwise the option of the full depth whose open path is shortest is applied, if its gain pays for the cheapest
+// candidate edge at its tip (else the next step could not pass the criterion), and the chain goes on from its tip;
+// else the chain's exchanges are undone. The chain is kept from undoing itself by Lin and Kernighan's rule in LKH's
+// form: the last edge an open option removes must be an edge of the tour the chain started from that no earlier
+// option removed; every other edge removed may be any edge of the tour, the chain's own added ones included.
+// depth 4 gives the 5-opt basis. The gains are read on the penalised distances of the ascent (every tour changes by
+// the same constant, so the choices change and the lengths do not), as in LKH.
+//
+// A descent runs chains from both tour edges of every active city, with don't-look bits. Given a reference tour (the
+// best tour, after a restart), no chain starts by removing one of its edges: the descent repairs the restart's
+// departures from it and leaves what they share to the fold.
 //
 // Non-sequential moves. A close that would shorten the tour but leaves two cycles instead is bridged: an edge of the
 // smaller cycle and an edge of the other are exchanged for the two edges that join the cycles, the first at a
@@ -111,7 +117,6 @@ static void kopt_apply(Tour *T, const Move *M, const int *e, const int *order, c
         }
     }
     for (int i = 0; i < k; i++) { tour_set_nb(T, M->rem[i][0]); tour_set_nb(T, M->rem[i][1]); }
-    for (int i = 0; i < k; i++) { tour_refresh(T, M->rem[i][0]); tour_refresh(T, M->rem[i][1]); }
 }
 
 // The best options at a tip: the close that leaves the tour shortest, when one leaves it shorter than at the chain's
@@ -188,12 +193,19 @@ static inline int kopt_added(const int *t, int k, int u, int v) {   // among the
 }
 
 // The options from the exchange t[0 .. 2k) with k removed edges, g its removed minus added length so far, C the chain.
-// Only an option that would be chosen is checked for being a tour.
+// Only an option that would be chosen is checked for being a tour; the enumeration ends at the first improving close.
 static void kopt_extend(const Tour *T, int *t, int k, double g, int depth, Best *B, const Chain *C) {
     const int f = t[2 * k - 1];
     if (k >= 2 && !tour_adjacent(T, f, t[0])) {   // close: (f, t1) is neither present nor just removed
         double total = B->dL + tour_c(T, f, t[0]) - g, G = g - B->dL;
-        int improving = total < B->best_close - 1e-9, better_open = !B->has_close && G > B->best_open + 1e-9;
+        int improving = total < B->best_close - 1e-9;
+        int better_open = !B->has_close && k == depth + 1 && G > B->best_open + 1e-9
+                          && !edge_in(C->add, C->na, t[2 * k - 2], f) && !edge_in(C->rem, C->nr, t[2 * k - 2], f);   // the last removed edge: of the start tour, not removed before
+        if (better_open) {   // the open gain must pay for the cheapest candidate edge at the tip
+            double cheapest = INFINITY;
+            for (int kk = 0; kk < T->K; kk++) if (!tour_adjacent(T, f, T->nn[f * T->K + kk]) && T->cc[f * T->K + kk] < cheapest) cheapest = T->cc[f * T->K + kk];
+            better_open = G > cheapest;
+        }
         if (improving || better_open) {
             Move M;
             move_from_t(&M, t, k);
@@ -208,16 +220,16 @@ static void kopt_extend(const Tour *T, int *t, int k, double g, int depth, Best 
         }
     }
     if (k > depth) return;
-    for (int kk = 0; kk < T->K; kk++) {
+    for (int kk = 0; kk < T->K && !B->has_close; kk++) {
         int c = T->nn[f * T->K + kk];
-        if (tour_adjacent(T, f, c) || kopt_added(t, k, f, c)) continue;
-        double g1 = g - tour_c(T, f, c);
+        double g1 = g - T->cc[f * T->K + kk];
         if (g1 - B->dL <= 0.0) continue;   // the gain criterion
-        for (int j = 0; j < 2; j++) {
+        if (tour_adjacent(T, f, c) || kopt_added(t, k, f, c)) continue;
+        for (int j = 0; j < 2 && !B->has_close; j++) {
             int c2 = T->nb[2 * c + j];
-            if (kopt_removed(t, k, c, c2) || edge_in(C->add, C->na, c, c2) || edge_in(C->rem, C->nr, c, c2)) continue;   // only edges of the start tour, each once
+            if (kopt_removed(t, k, c, c2)) continue;
             t[2 * k] = c; t[2 * k + 1] = c2;
-            kopt_extend(T, t, k + 1, g1 + tour_c(T, c, c2), depth, B, C);
+            kopt_extend(T, t, k + 1, g1 + T->ec[2 * c + j], depth, B, C);
         }
     }
 }
@@ -264,20 +276,26 @@ static double kopt_chain(Tour *T, int t1, int t2, int depth, Chain *C, int *buf,
 // The descent with don't-look bits: chains from both edges of every active city, a city made inactive when no chain
 // from it shortens the tour and active again when a chain touches it. Ends at a local optimum of the chained
 // neighbourhood. x, y: coordinates; nn: n x K candidates; pi: the ascent's penalties; tour_io: the city at each
-// position, in and out; chains: the number of chains run, added to. Returns the length.
+// position, in and out; chains: the number of chains run, added to; ref: a tour (the city at each position) none of
+// whose edges a chain starts by removing, or NULL. Returns the length.
 double pfa_tour_descent(int n, const double *x, const double *y, int round_mode, int K, const int *nn, const double *pi,
-                        int *tour_io, int depth, long *chains) {
-    Tour T = tour_new(n, K, round_mode, x, y, nn, tour_io);
-    T.pi = pi;
+                        int *tour_io, int depth, long *chains, const int *ref) {
+    Tour T = tour_new(n, K, round_mode, x, y, nn, tour_io, pi);
     int *queue = malloc(sizeof(int) * n), *buf = malloc(sizeof(int) * n);
     int *touched = malloc(sizeof(int) * 2 * KOPT_MAXK * CHAIN_MAX), ntouched;
     unsigned char *active = malloc(n);
     Chain *C = malloc(sizeof(Chain));
+    int *rn = NULL;   // ref's two neighbours of each city
+    if (ref) {
+        rn = malloc(sizeof(int) * 2 * n);
+        for (int p = 0; p < n; p++) { int c = ref[p]; rn[2 * c] = ref[p == 0 ? n - 1 : p - 1]; rn[2 * c + 1] = ref[p + 1 == n ? 0 : p + 1]; }
+    }
     int head = 0, count = n;
     for (int a = 0; a < n; a++) { queue[a] = a; active[a] = 1; }
     while (count > 0) {
         const int t1 = queue[head]; head = head + 1 == n ? 0 : head + 1; count--; active[t1] = 0;
         for (int i = 0; i < 2 && !active[t1]; i++) {
+            if (rn && (rn[2 * t1] == T.nb[2 * t1 + i] || rn[2 * t1 + 1] == T.nb[2 * t1 + i])) continue;
             (*chains)++;
             if (kopt_chain(&T, t1, T.nb[2 * t1 + i], depth, C, buf, touched, &ntouched) < 0.0) {
                 touched[ntouched++] = t1;
@@ -289,7 +307,7 @@ double pfa_tour_descent(int n, const double *x, const double *y, int round_mode,
         }
     }
     double L = T.L;
-    tour_free(&T); free(queue); free(buf); free(touched); free(active); free(C);
+    tour_free(&T); free(queue); free(buf); free(touched); free(active); free(C); free(rn);
     return L;
 }
 

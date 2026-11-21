@@ -147,7 +147,7 @@ _lib.pfa_tour_alpha.restype = ctypes.c_double
 # n, x, y, rounding, K, the candidates (n x K), the tour (city at each position, in and out), the exchanges' depth,
 # the number of chains run (added to); returns the length
 _lib.pfa_tour_descent.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, ctypes.c_int, _i32, _f64, _i32, ctypes.c_int,
-                                  ctypes.POINTER(ctypes.c_long)]
+                                  ctypes.POINTER(ctypes.c_long), ctypes.c_void_p]
 _lib.pfa_tour_descent.restype = ctypes.c_double
 # n, x, y, rounding, K, the candidates, a tour to keep edges of or None, the share kept, seed, the tour out
 _lib.pfa_tour_walk.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, ctypes.c_int, _i32, ctypes.c_void_p, ctypes.c_double,
@@ -156,6 +156,8 @@ _lib.pfa_tour_walk.restype = None
 # n, x, y, rounding, K, the candidates, two tours, the shortest child out, seed; returns its length (infinity if none)
 _lib.pfa_tour_fold.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, ctypes.c_int, _i32, _i32, _i32, _i32, ctypes.c_uint64]
 _lib.pfa_tour_fold.restype = ctypes.c_double
+_lib.pfa_tour_ipt.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, _i32, _i32, _i32]
+_lib.pfa_tour_ipt.restype = ctypes.c_double
 _lib.pfa_from_one_hot.argtypes = [
     _f64_2d,  # one-hot couplings over all slots
     _f64,  # one-hot fields
@@ -1187,8 +1189,9 @@ def tour(points: np.ndarray, num_steps: int = 1000, seed: int = 42, rounding: st
     alpha-nearest, from the Held-Karp relaxation; the kernel is Lin and Kernighan's chain of sequential 5-opt exchanges
     over them at zero temperature, with the non-sequential bridge of an exchange that splits the tour, the Boltzmann
     draw's limit on this landscape (see the README); the loop is PFA's:
-    restarts from a walk along the candidate edges biased to the best tour's, each descended to a local optimum and
-    folded into the best tour by edge assembly, as long as the budget holds. num_steps is the budget, the number of
+    restarts from a walk along the candidate edges biased to the best tour's, each descended to a local optimum by
+    chains that start away from the edges kept from the best tour, and folded into the best tour by partial
+    transcription and edge assembly, as long as the budget holds. num_steps is the budget, the number of
     chains in all; the first descent runs whole. rounding: None for Euclidean distances, "nint" for TSPLIB's EUC_2D
     (rounded to the nearest integer), "ceil" for CEIL_2D. Returns the tour as the order of the cities (int64).
     """
@@ -1201,7 +1204,7 @@ def tour(points: np.ndarray, num_steps: int = 1000, seed: int = 42, rounding: st
     energy, spent = problem.descend(best)
     while spent < num_steps:
         t = problem.walk(rng, best)
-        e, used = problem.descend(t)
+        e, used = problem.descend(t, best)
         spent += used
         energy, best = problem.fold(energy, best, e, t, rng)
     return best.astype(np.int64)
@@ -1226,19 +1229,22 @@ class _Tour:
                            WALK_SHARE, int(rng.integers(1, 2**63)), t)
         return t
 
-    def descend(self, t):
-        """The kernel from tour t (changed in place): chains to a local optimum. Returns the length and the chains."""
+    def descend(self, t, ref=None):
+        """The kernel from tour t (changed in place): chains to a local optimum, none started by removing an edge of
+        ref (the best tour) when one is given. Returns the length and the chains."""
         chains = ctypes.c_long(0)
         length = _lib.pfa_tour_descent(self.n, self.x, self.y, self.round_mode, CANDIDATES, self.nn, self.pi, t, BASIS,
-                                       ctypes.byref(chains))
+                                       ctypes.byref(chains), None if ref is None else ref.ctypes.data)
         return length, chains.value
 
     def fold(self, energy, best, e, t, rng):
-        """The best tour after edge assembly with a new one: the shortest of the two and their children."""
-        child = np.empty(self.n, dtype=np.int32)
+        """The best tour after folding a new one into it: the shortest of the two, their edge-assembly child and their
+        transcription child."""
+        child, child2 = np.empty(self.n, dtype=np.int32), np.empty(self.n, dtype=np.int32)
         ec = _lib.pfa_tour_fold(self.n, self.x, self.y, self.round_mode, CANDIDATES, self.nn, best, t, child,
                                 int(rng.integers(1, 2**63)))
-        return min(((energy, best), (e, t), (ec, child)), key=lambda p: p[0])
+        ec2 = _lib.pfa_tour_ipt(self.n, self.x, self.y, self.round_mode, best, t, child2)
+        return min(((energy, best), (e, t), (ec, child), (ec2, child2)), key=lambda p: p[0])
 
 
 def _one_hot_layout(groups):
