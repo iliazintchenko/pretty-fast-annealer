@@ -548,15 +548,23 @@ for a few others. The mapping has two parts, and the solver's rule enters at the
   tree's edges and the edge's penalised length minus the longest edge on its tree path otherwise. The lists come from
   the problem, before any move is made, and are the whole of what the kernel knows about the geometry.
 - **The move.** The kernel (`tour_chain.c`) works on the tour with one edge open, the path from an anchor to a tip.
-  From the tip every sequential exchange of up to three edges over the candidates is enumerated with its exact change
-  of length, including the exchange that leaves a cycle and a path until the next one repairs it; the enumeration is
-  generic, the removed edges cut the tour into segments and the exchange is a tour iff the added edges link every
-  segment into one cycle. An exchange that leaves the tour shorter than at the chain's start is applied and the chain
-  ends; otherwise the one whose open path is shortest is applied if that path is shorter than the start tour and the
-  chain goes on from its tip; otherwise the chain is undone. An edge the chain added is not removed and one it removed
-  is not added again. That is Lin and Kernighan's chain, and the state in which it lives, the open path, is where a
-  tour's barriers are not barriers: an exchange that is uphill by an edge's length in tour space is a step along a
-  shortening path.
+  From the tip every sequential exchange of up to five edges over the candidates is enumerated with its exact change
+  of length, including the exchange that leaves a cycle and a path until the next one repairs it, and pruned by Lin
+  and Kernighan's gain criterion: an added edge must leave the open path shorter than the tour the chain started from.
+  The enumeration is generic: the removed edges cut the tour into segments and the exchange is a tour iff the added
+  edges link every segment into one cycle. An exchange that leaves the tour shorter than at the chain's start is
+  applied and the chain ends; otherwise the one whose open path is shortest is applied and the chain goes on from its
+  tip; otherwise the chain is undone. Only edges of the tour the chain started from are removed, each once, and an
+  edge the chain added is not removed. That is Lin and Kernighan's chain, and the state in which it lives, the open
+  path, is where a tour's barriers are not barriers: an exchange that is uphill by an edge's length in tour space is
+  a step along a shortening path. The gains are read on the penalised distances of the relaxation above, which leaves
+  every tour's length changed by the same constant and so the lengths exact, and steers the chain by the same
+  penalties that chose the candidates.
+- **The bridge.** An exchange that would shorten the tour but leaves two cycles instead is not lost: an edge of the
+  smaller cycle and an edge of the other, at a candidate pair, are exchanged for the two edges that join the cycles,
+  and the whole is an option when it shortens the tour. Those are the non-sequential moves, the double bridge among
+  them, that no chain of single exchanges reaches, and without them a tour loop stalls at the first local optimum of
+  its chained neighbourhood that every restart shares.
 - **Zero temperature.** The chain is the Boltzmann draw's cold limit on this landscape, and the cold limit is where
   the draw belongs here. At any finite temperature the distribution over tours is e^(−βL) whatever the moves are, so a
   richer move changes only how fast the walk mixes, and mixing is not what a tour lacks; a tour's quality is the local
@@ -564,7 +572,7 @@ for a few others. The mapping has two parts, and the solver's rule enters at the
   exchange's. So the kernel spends the budget cold, and the tempered form of the same chain is not run.
 - **The loop.** Around the kernel runs PFA's loop under the one budget: restarts, each a walk along the candidate
   edges that keeps the best tour's edges with high probability and chooses at random elsewhere, descended by chains
-  to a local optimum; and the fold, which for tours is edge assembly (`pfa/eax.py`). Two low tours do not differ in
+  to a local optimum; and the fold, which for tours is edge assembly (`tour_fold.c`). Two low tours do not differ in
   clusters a partition could exchange: their differing edges form alternating cycles, and taking one cycle's edges
   from the other tour gives a set of subtours, merged into one tour by the cheapest exchange between the smallest
   subtour and the rest. The shortest of the two tours and their children becomes the best tour.
@@ -577,7 +585,7 @@ is the loop that holds them under one number.
 `make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the six kernels: `spin.c`,
 `categorical.c` and `swap.c` for couplings as an array, and `sparse_spin.c`, `sparse_categorical.c` and
 `sparse_swap.c`, which draw from the tree of sums of `sums.c`; `eliminate.c` and `fold.c`; and for tours `tour.c`,
-`tour_chain.c` and `alpha.c`. The three array kernels use the one SIMD path that matches the machine; the rest is the
+`tour_chain.c`, `alpha.c` and `tour_fold.c`. The three array kernels use the one SIMD path that matches the machine; the rest is the
 same code on every path:
 
 | path | files | used on |

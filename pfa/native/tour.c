@@ -23,6 +23,7 @@ typedef struct {
     int *inv_start, *inv; // the (a, k) pairs naming each city as the candidate c, CSR by c
     float *q;             // 4 per (a, k): dL of the four cuts
     double L;
+    const double *pi;     // the ascent's city penalties, or NULL: the chain's gains are read on the penalised distances
 } Tour;
 
 static inline double tour_d(const Tour *T, int i, int j) {
@@ -30,6 +31,9 @@ static inline double tour_d(const Tour *T, int i, int j) {
     if (T->round_mode == 1) return floor(r + 0.5);
     if (T->round_mode == 2) return ceil(r);
     return r;
+}
+static inline double tour_c(const Tour *T, int i, int j) {   // the penalised distance: every tour changes by the same 2 sum pi
+    return T->pi ? tour_d(T, i, j) + T->pi[i] + T->pi[j] : tour_d(T, i, j);
 }
 static inline int tour_succ(const Tour *T, int a) { int p = T->pos[a] + 1; return T->tour[p == T->n ? 0 : p]; }
 static inline int tour_pred(const Tour *T, int a) { int p = T->pos[a] - 1; return T->tour[p < 0 ? T->n - 1 : p]; }
@@ -60,7 +64,7 @@ static void tour_refresh(Tour *T, int z) {
 
 static Tour tour_new(int n, int K, int round_mode, const double *x, const double *y, const int *nn, int *tour_io) {
     Tour T = {n, K, round_mode, x, y, nn, tour_io, malloc(sizeof(int) * n), malloc(sizeof(int) * 2 * n), malloc(n),
-              calloc(n + 1, sizeof(int)), malloc(sizeof(int) * n * K), malloc(sizeof(float) * 4 * n * K), 0.0};
+              calloc(n + 1, sizeof(int)), malloc(sizeof(int) * n * K), malloc(sizeof(float) * 4 * n * K), 0.0, NULL};
     for (int k = 0; k < n; k++) T.pos[T.tour[k]] = k;
     for (int a = 0; a < n; a++) { T.nb[2 * a] = tour_succ(&T, a); T.nb[2 * a + 1] = tour_pred(&T, a); T.o[a] = 0; }
     for (int m = 0; m < n * K; m++) T.inv_start[nn[m] + 1]++;

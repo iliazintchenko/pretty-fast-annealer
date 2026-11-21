@@ -8,8 +8,10 @@
 //   sparse_swap.c          exchanges, sparse couplings: pfa_anneal_sparse_swap()
 //   tour.c                 tours through cities by coordinates: the tour structure and its move table
 //   tour_chain.c           the tour kernel, Lin and Kernighan's chain of sequential exchanges over the candidates at
-//                          zero temperature, with don't-look bits: pfa_tour_descent()
+//                          zero temperature, with don't-look bits: pfa_tour_descent(); the walk along the candidate
+//                          edges that starts a restart: pfa_tour_walk()
 //   alpha.c                the candidate edges of a tour problem by alpha-nearness: pfa_tour_alpha()
+//   tour_fold.c            edge assembly between two tours, the fold for tours: pfa_tour_fold()
 //   eliminate.c           categorical variables: pfa_eliminate(), before the anneal
 //   fold.c                 pfa_fold_spin(), pfa_fold_sparse_spin(), pfa_fold_categorical(), pfa_fold_swap(): one
 //                          state takes from another every part that it has lower, between the repetitions
@@ -140,5 +142,6 @@ const char *pfa_simd_path(void) { return SIMD_PATH; }
 #include "tour.c"
 #include "tour_chain.c"
 #include "alpha.c"
+#include "tour_fold.c"
 #include "eliminate.c"
 #include "fold.c"

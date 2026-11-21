@@ -3,7 +3,6 @@ import os
 
 import numpy as np
 
-from . import eax
 from .utils import validate
 
 # built by running `make` in the repository root
@@ -143,13 +142,20 @@ _lib.pfa_anneal_sparse_swap.restype = None
 _lib.pfa_fold_swap.argtypes = [_f64_2d, _f64_2d, _f64_2d, ctypes.c_int, ctypes.c_int, _i32, _i32]
 _lib.pfa_fold_swap.restype = ctypes.c_double
 # n, x, y, rounding (0 none, 1 nearest integer, 2 ceiling), K, the candidates out (n x K); returns the Held-Karp bound
-_lib.pfa_tour_alpha.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, ctypes.c_int, _i32]
+_lib.pfa_tour_alpha.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, ctypes.c_int, _i32, _f64]
 _lib.pfa_tour_alpha.restype = ctypes.c_double
 # n, x, y, rounding, K, the candidates (n x K), the tour (city at each position, in and out), the exchanges' depth,
 # the number of chains run (added to); returns the length
-_lib.pfa_tour_descent.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_int,
+_lib.pfa_tour_descent.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, ctypes.c_int, _i32, _f64, _i32, ctypes.c_int,
                                   ctypes.POINTER(ctypes.c_long)]
 _lib.pfa_tour_descent.restype = ctypes.c_double
+# n, x, y, rounding, K, the candidates, a tour to keep edges of or None, the share kept, seed, the tour out
+_lib.pfa_tour_walk.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, ctypes.c_int, _i32, ctypes.c_void_p, ctypes.c_double,
+                               ctypes.c_uint64, _i32]
+_lib.pfa_tour_walk.restype = None
+# n, x, y, rounding, K, the candidates, two tours, the shortest child out, seed; returns its length (infinity if none)
+_lib.pfa_tour_fold.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, ctypes.c_int, _i32, _i32, _i32, _i32, ctypes.c_uint64]
+_lib.pfa_tour_fold.restype = ctypes.c_double
 _lib.pfa_from_one_hot.argtypes = [
     _f64_2d,  # one-hot couplings over all slots
     _f64,  # one-hot fields
@@ -1171,15 +1177,16 @@ def _anneal_swap(A, table, fields, counts, S, x0, energy0, beta_start, beta_max,
 
 
 CANDIDATES = 5   # candidates per city for the tour moves: the alpha-nearest
-BASIS = 2        # the exchanges' depth: 2, the 3-opt basis
+BASIS = 4        # the exchanges' depth: 4, the 5-opt basis
 WALK_SHARE = 0.8   # a restart's walk takes an unvisited candidate on the best tour's edge with this probability
 
 
 def tour(points: np.ndarray, num_steps: int = 1000, seed: int = 42, rounding: str | None = None) -> np.ndarray:
     """
     The shortest closed tour through points (n x 2 coordinates). The candidate edges are each city's five
-    alpha-nearest, from the Held-Karp relaxation; the kernel is Lin and Kernighan's chain of sequential 3-opt exchanges
-    over them at zero temperature, the Boltzmann draw's limit on this landscape (see the README); the loop is PFA's:
+    alpha-nearest, from the Held-Karp relaxation; the kernel is Lin and Kernighan's chain of sequential 5-opt exchanges
+    over them at zero temperature, with the non-sequential bridge of an exchange that splits the tour, the Boltzmann
+    draw's limit on this landscape (see the README); the loop is PFA's:
     restarts from a walk along the candidate edges biased to the best tour's, each descended to a local optimum and
     folded into the best tour by edge assembly, as long as the budget holds. num_steps is the budget, the number of
     chains in all; the first descent runs whole. rounding: None for Euclidean distances, "nint" for TSPLIB's EUC_2D
@@ -1190,94 +1197,48 @@ def tour(points: np.ndarray, num_steps: int = 1000, seed: int = 42, rounding: st
         raise ValueError("points must be n x 2 coordinates of at least eight cities")
     problem = _Tour(points, {None: 0, "nint": 1, "ceil": 2}[rounding])
     rng = np.random.default_rng(seed)
-    t = problem.walk(rng)
-    energy, spent = problem.descend(t)
-    best = problem.encode(t)
+    best = problem.walk(rng)
+    energy, spent = problem.descend(best)
     while spent < num_steps:
         t = problem.walk(rng, best)
         e, used = problem.descend(t)
         spent += used
-        energy, best = problem.fold(energy, best, e, problem.encode(t), rng)
-    return problem.decode(best).astype(np.int64)
+        energy, best = problem.fold(energy, best, e, t, rng)
+    return best.astype(np.int64)
 
 
 class _Tour:
-    """A tour problem: the coordinates, the candidates, the kernel's calls. A tour is kept as its edge set: per city,
-    its two neighbours as one code, min * n + max, invariant to the tour's rotation and reflection; the kernel works on
-    the city at each position, decoded for it and encoded from it."""
+    """A tour problem: the coordinates, the candidates, the kernel's calls. Tours are the city at each position."""
 
     def __init__(self, points, round_mode):
         self.n = n = len(points)
         self.round_mode = round_mode
         self.x, self.y = np.ascontiguousarray(points[:, 0]), np.ascontiguousarray(points[:, 1])
-        flat = np.empty(n * CANDIDATES, dtype=np.int32)
-        self.bound = _lib.pfa_tour_alpha(n, self.x, self.y, round_mode, CANDIDATES, flat)   # the Held-Karp bound reached
-        self.nn = flat.reshape(n, CANDIDATES)
-        self.nn_flat = flat
-
-    def distances(self, i, j):
-        r = np.sqrt((self.x[i] - self.x[j]) ** 2 + (self.y[i] - self.y[j]) ** 2)
-        return np.floor(r + 0.5) if self.round_mode == 1 else np.ceil(r) if self.round_mode == 2 else r
-
-    def encode(self, t):
-        """The edge-set code of a tour (city at each position)."""
-        prev, nxt = np.roll(t, 1), np.roll(t, -1)
-        code = np.empty(self.n, dtype=np.int64)
-        code[t] = np.minimum(prev, nxt).astype(np.int64) * self.n + np.maximum(prev, nxt)
-        return code
-
-    def decode(self, code):
-        """A tour (city at each position) with the edge set code."""
-        n = self.n
-        a, b = code // n, code % n
-        t = np.empty(n, dtype=np.int32)
-        prev, cur = -1, 0
-        for k in range(n):
-            t[k] = cur
-            nxt = int(a[cur]) if a[cur] != prev else int(b[cur])
-            prev, cur = cur, nxt
-        return t
+        self.nn, self.pi = np.empty(n * CANDIDATES, dtype=np.int32), np.empty(n)
+        self.bound = _lib.pfa_tour_alpha(n, self.x, self.y, round_mode, CANDIDATES, self.nn, self.pi)   # the Held-Karp bound reached
 
     def walk(self, rng, best=None):
         """A tour by a random walk along the candidate edges: from a random city, an unvisited candidate on the best
         tour's edge with probability WALK_SHARE when there is one, else a random unvisited candidate, else the nearest
         unvisited city."""
-        n = self.n
-        on_best = None if best is None else np.stack((best // n, best % n), axis=1)
-        seen = np.zeros(n, dtype=bool)
-        cur = int(rng.integers(n))
-        tour = [cur]
-        seen[cur] = True
-        for _ in range(n - 1):
-            free = [int(c) for c in self.nn[cur] if not seen[c]]
-            kept = [] if on_best is None else [c for c in free if c in on_best[cur]]
-            if kept and rng.random() < WALK_SHARE:
-                cur = kept[int(rng.integers(len(kept)))]
-            elif free:
-                cur = free[int(rng.integers(len(free)))]
-            else:
-                rest = np.flatnonzero(~seen)
-                cur = int(rest[np.argmin(self.distances(cur, rest))])
-            tour.append(cur)
-            seen[cur] = True
-        return np.array(tour, dtype=np.int32)
+        t = np.empty(self.n, dtype=np.int32)
+        _lib.pfa_tour_walk(self.n, self.x, self.y, self.round_mode, CANDIDATES, self.nn, None if best is None else best.ctypes.data,
+                           WALK_SHARE, int(rng.integers(1, 2**63)), t)
+        return t
 
     def descend(self, t):
-        """The kernel from tour t (city at each position, changed in place): chains to a local optimum. Returns the
-        length and the number of chains."""
+        """The kernel from tour t (changed in place): chains to a local optimum. Returns the length and the chains."""
         chains = ctypes.c_long(0)
-        length = _lib.pfa_tour_descent(self.n, self.x, self.y, self.round_mode, CANDIDATES, self.nn_flat, t, BASIS,
+        length = _lib.pfa_tour_descent(self.n, self.x, self.y, self.round_mode, CANDIDATES, self.nn, self.pi, t, BASIS,
                                        ctypes.byref(chains))
         return length, chains.value
 
-    def fold(self, energy, best, e, code, rng):
+    def fold(self, energy, best, e, t, rng):
         """The best tour after edge assembly with a new one: the shortest of the two and their children."""
-        dist = lambda i, j: float(self.distances(np.int64(i), np.int64(j)))
-        cands = [(energy, best), (e, code)]
-        child = eax.fold(best, code, self.n, dist, self.nn.astype(np.int64), rng)
-        if child is not None:
-            cands.append(child)
-        return min(cands, key=lambda p: p[0])
+        child = np.empty(self.n, dtype=np.int32)
+        ec = _lib.pfa_tour_fold(self.n, self.x, self.y, self.round_mode, CANDIDATES, self.nn, best, t, child,
+                                int(rng.integers(1, 2**63)))
+        return min(((energy, best), (e, t), (ec, child)), key=lambda p: p[0])
 
 
 def _one_hot_layout(groups):

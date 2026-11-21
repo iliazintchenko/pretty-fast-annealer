@@ -11,7 +11,7 @@
 // smallest alpha at each city are its candidates.
 //
 // Costs O(n^2) per ascent iteration and in memory for the distances and the path maxima; the ascent runs at most a
-// hundred iterations. nn_out: n x K candidate cities; the bound reached is returned.
+// hundred iterations. nn_out: n x K candidate cities; pi_out: the penalties; the bound reached is returned.
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,7 +55,7 @@ static double alpha_tree(int n, const float *D, const double *pi, int s, int *pa
     return L + D[(long)s * n + j1] + pi[s] + pi[j1] + D[(long)s * n + j2] + pi[s] + pi[j2];
 }
 
-double pfa_tour_alpha(int n, const double *x, const double *y, int round_mode, int K, int *nn_out) {
+double pfa_tour_alpha(int n, const double *x, const double *y, int round_mode, int K, int *nn_out, double *pi_out) {
     float *D = malloc(sizeof(float) * (long)n * n);
     for (int i = 0; i < n; i++) for (int j = 0; j < n; j++) D[(long)i * n + j] = alpha_d(x, y, round_mode, i, j);
     double *pi = calloc(n, sizeof(double)), *pi_best = calloc(n, sizeof(double)), *vprev = calloc(n, sizeof(double));
@@ -118,6 +118,7 @@ double pfa_tour_alpha(int n, const double *x, const double *y, int round_mode, i
             ba[q] = a; bd[q] = d; bj[q] = j;
         }
     }
+    memcpy(pi_out, pi_best, sizeof(double) * n);
     free(D); free(pi); free(pi_best); free(vprev); free(key); free(parent); free(order); free(deg); free(in); free(B);
     free(ba); free(bd);
     return Wbest;
