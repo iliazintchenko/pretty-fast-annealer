@@ -557,7 +557,9 @@ for a few others. The mapping has two parts, and the solver's rule enters at the
   its gain pays for the cheapest candidate edge at its tip, and the chain goes on from there; otherwise the chain is
   undone. The chain is kept from undoing itself by one rule: the last edge an open exchange removes must be an edge of
   the tour the chain started from that the chain has not removed before; every other edge removed may be any edge of
-  the tour, the chain's own added ones included. That is Lin and Kernighan's chain, and the state in which it lives,
+  the tour, the chain's own added ones included. A step enumerates a bounded number of options, since on clustered
+  instances every candidate edge is as long as the next and the criterion prunes nothing. That is Lin and
+  Kernighan's chain, and the state in which it lives,
   the open path, is where a tour's barriers are not barriers: an exchange that is uphill by an edge's length in tour
   space is a step along a shortening path. The gains are read on the penalised distances of the relaxation above,
   which leaves every tour's length changed by the same constant and so the lengths exact, and steers the chain by the

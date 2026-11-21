@@ -13,7 +13,9 @@
 // candidate edge at its tip (else the next step could not pass the criterion), and the chain goes on from its tip;
 // else the chain's exchanges are undone. The chain is kept from undoing itself by Lin and Kernighan's rule in LKH's
 // form: the last edge an open option removes must be an edge of the tour the chain started from that no earlier
-// option removed; every other edge removed may be any edge of the tour, the chain's own added ones included.
+// option removed; every other edge removed may be any edge of the tour, the chain's own added ones included. A step
+// enumerates at most STEP_BUDGET options: on clustered instances every candidate edge is as long as the next and the
+// gain criterion prunes nothing, so an unbounded step costs ten times a step elsewhere for the same choice.
 // depth 4 gives the 5-opt basis. The gains are read on the penalised distances of the ascent (every tour changes by
 // the same constant, so the choices change and the lengths do not), as in LKH.
 //
@@ -33,6 +35,7 @@
 // neighbours; those of a reversed one flip o; the ends get new neighbours and their table entries recomputed.
 #define KOPT_MAXK 7
 #define CHAIN_MAX 64
+#define STEP_BUDGET 500   // options enumerated per step at most: on clustered instances, where every candidate edge is as long as the next, the criterion prunes nothing
 
 typedef struct { int k; int rem[KOPT_MAXK][2], add[KOPT_MAXK][2]; } Move;   // k removed and k added edges
 typedef struct { int na, nr; int add[CHAIN_MAX * KOPT_MAXK][2], rem[CHAIN_MAX * KOPT_MAXK][2]; } Chain;
@@ -193,9 +196,12 @@ static inline int kopt_added(const int *t, int k, int u, int v) {   // among the
 }
 
 // The options from the exchange t[0 .. 2k) with k removed edges, g its removed minus added length so far, C the chain.
-// Only an option that would be chosen is checked for being a tour; the enumeration ends at the first improving close.
+// Only an option that would be chosen is checked for being a tour; the enumeration ends at the first improving close,
+// or after STEP_BUDGET options with the best open one found.
+static int step_options;
 static void kopt_extend(const Tour *T, int *t, int k, double g, int depth, Best *B, const Chain *C) {
     const int f = t[2 * k - 1];
+    if (++step_options > STEP_BUDGET) return;
     if (k >= 2 && !tour_adjacent(T, f, t[0])) {   // close: (f, t1) is neither present nor just removed
         double total = B->dL + tour_c(T, f, t[0]) - g, G = g - B->dL;
         int improving = total < B->best_close - 1e-9;
@@ -245,6 +251,7 @@ static double kopt_chain(Tour *T, int t1, int t2, int depth, Chain *C, int *buf,
     for (int s = 0; s < CHAIN_MAX; s++) {
         int t[2 * KOPT_MAXK] = {t1, f};
         Best B = {dL, 0.0, 0.0, 0, 0};
+        step_options = 0;
         kopt_extend(T, t, 1, tour_c(T, t1, f), depth, &B, C);
         if (!B.has_close && !B.has_open) break;
         const Move *M = B.has_close ? &B.mc : &B.mo;
