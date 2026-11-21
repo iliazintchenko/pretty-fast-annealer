@@ -534,12 +534,51 @@ the sparse kernel is far faster: at degree 30 about twice, at degree 3 a hundred
 changed variable touches all q = n classes, so the array kernel keeps problems below about a thousand variables, and
 the sparse one takes the large sparse ones.
 
+### Tours
+
+`pfa.tour()` solves the travelling salesman problem over points in the plane. A tour is not written as spins or as a
+permutation of exchanged variables: its native state is the cycle, and its native moves are exchanges of a few edges
+for a few others. The mapping has two parts, and the solver's rule enters at the end.
+
+- **Candidates.** A move is only ever drawn among the edges on some city's candidate list, so the list is the
+  problem's coupling graph as the kernel sees it: an edge on no list never enters the tour. The nearest cities miss
+  the long edges an optimal tour has to use. The lists are the five alpha-nearest instead (`alpha.c`): Held and Karp's
+  relaxation, the minimum 1-tree under city penalties pushed by subgradient ascent towards degree two everywhere, is a
+  lower bound every tour obeys, and an edge's alpha is the rise of that bound when the edge is forced in, zero for the
+  tree's edges and the edge's penalised length minus the longest edge on its tree path otherwise. The lists come from
+  the problem, before any move is made, and are the whole of what the kernel knows about the geometry.
+- **The move.** The kernel (`tour_chain.c`) works on the tour with one edge open, the path from an anchor to a tip.
+  From the tip every sequential exchange of up to three edges over the candidates is enumerated with its exact change
+  of length, including the exchange that leaves a cycle and a path until the next one repairs it; the enumeration is
+  generic, the removed edges cut the tour into segments and the exchange is a tour iff the added edges link every
+  segment into one cycle. An exchange that leaves the tour shorter than at the chain's start is applied and the chain
+  ends; otherwise the one whose open path is shortest is applied if that path is shorter than the start tour and the
+  chain goes on from its tip; otherwise the chain is undone. An edge the chain added is not removed and one it removed
+  is not added again. That is Lin and Kernighan's chain, and the state in which it lives, the open path, is where a
+  tour's barriers are not barriers: an exchange that is uphill by an edge's length in tour space is a step along a
+  shortening path.
+- **Zero temperature.** The chain is the Boltzmann draw's cold limit on this landscape, and the cold limit is where
+  the draw belongs here. At any finite temperature the distribution over tours is e^(−βL) whatever the moves are, so a
+  richer move changes only how fast the walk mixes, and mixing is not what a tour lacks; a tour's quality is the local
+  optimum of its neighbourhood, and the chained neighbourhood's optima are a different class from any single
+  exchange's. So the kernel spends the budget cold, and the tempered form of the same chain is not run.
+- **The loop.** Around the kernel runs PFA's loop under the one budget: restarts, each a walk along the candidate
+  edges that keeps the best tour's edges with high probability and chooses at random elsewhere, descended by chains
+  to a local optimum; and the fold, which for tours is edge assembly (`pfa/eax.py`). Two low tours do not differ in
+  clusters a partition could exchange: their differing edges form alternating cycles, and taking one cycle's edges
+  from the other tour gives a set of subtours, merged into one tour by the cheapest exchange between the smallest
+  subtour and the rest. The shortest of the two tours and their children becomes the best tour.
+
+The kernel is Lin and Kernighan's and the fold is Nagata's; the candidates are the problem's. What is PFA's on tours
+is the loop that holds them under one number.
+
 ## Usage
 
 `make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the six kernels: `spin.c`,
 `categorical.c` and `swap.c` for couplings as an array, and `sparse_spin.c`, `sparse_categorical.c` and
-`sparse_swap.c`, which draw from the tree of sums of `sums.c`; and `eliminate.c` and `fold.c`. The three array
-kernels use the one SIMD path that matches the machine; the rest is the same code on every path:
+`sparse_swap.c`, which draw from the tree of sums of `sums.c`; `eliminate.c` and `fold.c`; and for tours `tour.c`,
+`tour_chain.c` and `alpha.c`. The three array kernels use the one SIMD path that matches the machine; the rest is the
+same code on every path:
 
 | path | files | used on |
 |---|---|---|
@@ -573,6 +612,12 @@ couplings, fields, sizes and the energy offset between the two forms; `pfa.to_on
 result back. A problem over 0/1 variables converts to spins with `pfa.from_binary(couplings, fields, offset)`, and
 `pfa.energy(state, couplings, fields, offset)` is ½ sᵀ J s + hᵀ s + offset for a ±1 or a 0/1 state.
 
+`pfa.tour(points, num_steps, seed, rounding)` returns the shortest tour found through `points`, an n × 2 array of
+coordinates, as the order of the cities (int64). `num_steps` is the budget, the number of chains in all, the first
+descent running whole; `rounding` is `None` for Euclidean distances, `"nint"` for TSPLIB's EUC_2D (distances rounded to
+the nearest integer) or `"ceil"` for CEIL_2D (see Tours).
+
 `examples/spins.py` solves a small problem given over 0/1 variables, `examples/colouring.py` colours a graph with
 several values per variable, `examples/qap.py` solves a quadratic assignment and `examples/partition.py` cuts a graph
-in two equal parts, both by exchanges, and `examples/throughput.py` measures steps per second.
+in two equal parts, both by exchanges, `examples/tour.py` finds a tour through random points, and
+`examples/throughput.py` measures steps per second.
