@@ -160,6 +160,8 @@ _lib.pfa_tour_ipt.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, _i32, _i32
 _lib.pfa_tour_ipt.restype = ctypes.c_double
 _lib.pfa_route_loop.argtypes = [ctypes.c_int, ctypes.c_int, _f64, _f64, ctypes.c_int, _i32, ctypes.c_int, ctypes.c_double, ctypes.c_int, _i32,
                                 ctypes.c_int, ctypes.c_uint64, ctypes.c_double, ctypes.c_int, ctypes.c_int, _i32, _f64, _i32, ctypes.c_void_p]
+_lib.pfa_shop_loop.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_long, ctypes.c_long, ctypes.c_uint64, ctypes.c_int, _i32, _i32, _i64, _i64]
+_lib.pfa_shop_loop.restype = ctypes.c_int
 _lib.pfa_route_loop.restype = ctypes.c_int
 _lib.pfa_from_one_hot.argtypes = [
     _f64_2d,  # one-hot couplings over all slots
@@ -1328,6 +1330,57 @@ class _Routes:
         if cur: routes.append(cur)
         return routes
 
+
+
+SHOP_POOL = 30          # the loop's pool of schedules
+SHOP_CUTOFF = 12500     # the long tabu search's cutoff, iterations without a new best; the short one a 25th of it
+
+
+def shop(machines: np.ndarray, durations: np.ndarray, num_steps: int = 100, seed: int = 42) -> tuple[int, list[list[int]]]:
+    """
+    The job shop: machines and durations are n x m, row j the operations of job j in order, machines[j, i] the machine
+    (0 .. m - 1, each once per job) and durations[j, i] its processing time; one operation at a time per machine;
+    the makespan minimised. The kernel is Zhang et al.'s tabu search on the N7 neighbourhood of the critical path at
+    zero temperature; the loop is Peng, Lu and Cheng's path relinking over a pool of schedules (see the README).
+    num_steps is the budget, the number of restarts. Returns (makespan, orders): orders[k] the jobs on machine k in
+    sequence.
+    """
+    machines, durations = np.asarray(machines), np.asarray(durations)
+    if machines.ndim != 2 or machines.shape != durations.shape or machines.shape[0] < 2 or machines.shape[1] < 2:
+        raise ValueError("machines and durations must be n x m with at least two jobs and two machines")
+    n, m = machines.shape
+    if any(sorted(machines[j]) != list(range(m)) for j in range(n)) or (durations <= 0).any():
+        raise ValueError("every job must visit every machine once, with positive durations")
+    problem = _Shop(machines, durations)
+    rng = np.random.default_rng(seed)
+    chunk = 10
+    for _ in range(0, num_steps, chunk):
+        problem.loop(min(chunk, num_steps), rng)
+    return problem.best()
+
+
+class _Shop:
+    """A job-shop problem as the kernel sees it: operations j*m + i, the pool of machine orders."""
+
+    def __init__(self, machines, durations):
+        self.n, self.m = machines.shape
+        self.mach = np.ascontiguousarray(machines.reshape(-1), dtype=np.int32)
+        self.dur = np.ascontiguousarray(durations.reshape(-1), dtype=np.int32)
+        self.P = SHOP_POOL
+        self.pool = np.zeros(self.P * self.n * self.m, dtype=np.int32)
+        self.cost = np.full(self.P, 0x7fffffff, dtype=np.int32)
+        self.dm = np.zeros(self.P * self.P, dtype=np.int64)
+
+    def loop(self, restarts, rng):
+        st = np.zeros(4, dtype=np.int64)
+        return _lib.pfa_shop_loop(self.n, self.m, self.mach, self.dur, restarts, SHOP_CUTOFF, int(rng.integers(1, 2**63)),
+                                  self.P, self.pool, self.cost, self.dm, st)
+
+    def best(self):
+        i = int(np.argmin(self.cost))
+        N = self.n * self.m
+        seq = self.pool[i * N:(i + 1) * N]
+        return int(self.cost[i]), [list(map(int, seq[k * self.n:(k + 1) * self.n])) for k in range(self.m)]
 
 def _one_hot_layout(groups):
     """Variable of each slot (labels in sorted order), slots grouped by variable in input order, values per variable,

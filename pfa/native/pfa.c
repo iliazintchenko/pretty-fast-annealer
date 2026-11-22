@@ -17,6 +17,9 @@
 //                          pfa_route_split(); the walk over the customers, pfa_route_walk()
 //   route_fold.c           edge assembly on the graph with the depot as one node, pfa_route_fold(); the loop with
 //                          the pool, pfa_route_loop()
+//   shop.c                 the job shop: heads and tails of the disjunctive graph, Giffler and Thompson's start,
+//                          pfa_shop_gt(); the tabu search on the N7 neighbourhood at zero temperature, pfa_shop_tabu()
+//   shop_loop.c            path relinking over a pool of schedules, the loop: pfa_shop_loop()
 //   eliminate.c           categorical variables: pfa_eliminate(), before the anneal
 //   fold.c                 pfa_fold_spin(), pfa_fold_sparse_spin(), pfa_fold_categorical(), pfa_fold_swap(): one
 //                          state takes from another every part that it has lower, between the repetitions
@@ -151,5 +154,7 @@ const char *pfa_simd_path(void) { return SIMD_PATH; }
 #include "tour_ipt.c"
 #include "route.c"
 #include "route_fold.c"
+#include "shop.c"
+#include "shop_loop.c"
 #include "eliminate.c"
 #include "fold.c"

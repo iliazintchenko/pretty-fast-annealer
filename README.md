@@ -644,12 +644,56 @@ The kernel is Vidal's, the fold is Nagata's in Nagata and Bräysy's setting, the
 Vidal's; the pool is the hybrid genetic search's population in PFA's clothes. What is PFA's on routes is the fold and
 the loop under one number, and the finding that the one-best loop that carries tours does not carry routes.
 
+### Shops
+
+`pfa.shop()` solves the job shop: jobs, each a fixed sequence of operations on given machines with given durations,
+one operation at a time per machine, the makespan minimised. The reference is the tabu-search line (Nowicki and
+Smutnicki, Zhang et al., Peng, Lü and Cheng) for the search and CP-SAT for the open-source incumbent; the objective
+is where the first two classes' lessons stop: a longest path, not a sum.
+
+- **The state.** The order of the jobs on every machine, with every operation's head (the longest path from the
+  start to it) and tail (from its end to the finish): the makespan is the longest head plus duration plus tail, and
+  an operation is critical when its three reach it. Orders drawn at random are cyclic, so a start is an active
+  schedule built by Giffler and Thompson's rule with a random choice among the conflicting operations. After a move
+  the heads and tails are recomputed by one topological pass, or, past tens of thousands of operations, only over the
+  operations the move can reach.
+- **The move.** The kernel (`shop.c`) is Zhang et al.'s tabu search on their N7 neighbourhood at zero temperature.
+  The critical path is cut into blocks, maximal runs on one machine; every inner operation of a block is moved to the
+  block's front or to its back, and the block's first and last operations are moved inside it; a change at the front
+  of the path's first block or the back of its last cannot shorten the path and is left out. A move is generated only
+  when Balas and Vazacopoulos's one-comparison condition on the heads and tails guarantees the orders stay acyclic,
+  nothing is repaired, and it is scored by the head and tail recurrence over the re-sequenced block from the stored
+  values around it: exact for the adjacent swap, an estimate otherwise, and measured exact in practice on every step
+  checked. The best move is taken whether or not it improves; the arcs it reversed may not be recreated for a tenure
+  drawn around ten plus the jobs per machine; a move that beats the best makespan is taken regardless; after a run
+  of iterations without a new best, a random move. The tabu is part of the kernel here, because the objective is a
+  maximum: most moves change nothing, a descent halts within a few hundred moves on a plateau of equal makespans,
+  and a Boltzmann draw over the moves is a uniform draw over that plateau. Zero temperature holds for the third class,
+  and for the first time the kernel keeps a memory.
+- **The loop.** The restart is Peng, Lü and Cheng's path relinking: from one member of a pool toward another,
+  adjacent pairs ordered differently in the two are swapped one at a time, each swap passed through the same
+  acyclicity test, and the path is walked with a short tabu search at every point and the long one at the best point;
+  the result replaces the pool's worst by makespan unless it repeats a member; the pool is first filled with
+  independent searches. The budget is the number of restarts, and the one number PFA fixes is the long search's
+  cutoff in iterations without a new best, the short search a fixed fraction of it. Measured and not kept: the route
+  class's pool rules, replacement by makespan rank plus closeness rank with clones out first and relinking from the
+  second member on, which lost to the reference's intensifying rules on this landscape, the opposite of routes; one
+  random point on the path with one long search, which lost to the walk of the whole path; the hash tabu on visited
+  solutions, worse on its own. The fold of two schedules was not built: the relink is the merge here, the state's
+  structure is a set of permutations with no degree constraint, and the alternating cycles of tours and routes have
+  no analogue.
+
+The kernel is Zhang et al.'s, the loop is Peng, Lü and Cheng's, the acyclicity condition Balas and Vazacopoulos's,
+the start Giffler and Thompson's. What is PFA's on shops is the budget as one number and the finding that the
+diversity rules that carried routes do not carry shops.
+
 ## Usage
 
 `make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the six kernels: `spin.c`,
 `categorical.c` and `swap.c` for couplings as an array, and `sparse_spin.c`, `sparse_categorical.c` and
 `sparse_swap.c`, which draw from the tree of sums of `sums.c`; `eliminate.c` and `fold.c`; and for tours `tour.c`,
-`tour_chain.c`, `alpha.c`, `tour_fold.c` and `tour_ipt.c`; and for routes `route.c` and `route_fold.c`. The three
+`tour_chain.c`, `alpha.c`, `tour_fold.c` and `tour_ipt.c`; for routes `route.c` and `route_fold.c`; and for shops
+`shop.c` and `shop_loop.c`. The three
 array kernels use the one SIMD path that matches the machine; the rest is the same code on every path:
 
 | path | files | used on |
@@ -693,7 +737,12 @@ the nearest integer) or `"ceil"` for CEIL_2D (see Tours).
 for `points` (n × 2 coordinates, the depot first), `demands` (n, zero at the depot) and a vehicle's `capacity`, the
 number of routes free. `num_steps` is the budget, the number of restarts; `rounding` as for tours (see Routes).
 
+`pfa.shop(machines, durations, num_steps, seed)` returns the makespan and the machine orders of a job shop given as
+two n × m arrays, row j the operations of job j in order, `machines[j, i]` the machine (each once per job) and
+`durations[j, i]` its processing time. `num_steps` is the budget, the number of restarts (see Shops).
+
 `examples/spins.py` solves a small problem given over 0/1 variables, `examples/colouring.py` colours a graph with
 several values per variable, `examples/qap.py` solves a quadratic assignment and `examples/partition.py` cuts a graph
 in two equal parts, both by exchanges, `examples/tour.py` finds a tour through random points, `examples/route.py`
-routes vehicles from a depot to random customers, and `examples/throughput.py` measures steps per second.
+routes vehicles from a depot to random customers, `examples/shop.py` schedules a random job shop, and
+`examples/throughput.py` measures steps per second.
