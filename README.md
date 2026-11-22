@@ -243,10 +243,11 @@ the best solver of each class of hard problem at equal wall time on one core. Th
 class are the loop, a kernel run cold, restarts that keep what the best state has, a fold of two states into one, and
 one budget number. The kernel is whatever move the class demands, and is usually the move the class's own best
 solver already uses: the Boltzmann step over spins, Taillard's exchange update on quadratic assignment, Lin and
-Kernighan's chain on tours, the route moves of the hybrid genetic search on routes. The reference is therefore
-different for every class: optimised simulated annealing on spin glasses, robust tabu search and the memetic
-algorithms on quadratic assignment, LKH on tours, HGS-CVRP on routes. The sections below say what is mapped how and
-what is whose; the measurements live with the problem sets.
+Kernighan's chain on tours, the route moves of the hybrid genetic search on routes, the critical-block tabu search on
+shops. The reference is therefore different for every class, and it is the state of the art of that class: optimised
+simulated annealing on spin glasses, robust tabu search and the memetic algorithms on quadratic assignment, LKH on
+tours, HGS-CVRP on routes, the tabu searches and the constraint-programming solvers on shops. The sections below say
+what is mapped how and what is whose; the measurements live with the problem sets.
 
 ### Spin glasses: the step against Metropolis
 
@@ -647,9 +648,10 @@ the loop under one number, and the finding that the one-best loop that carries t
 ### Shops
 
 `pfa.shop()` solves the job shop: jobs, each a fixed sequence of operations on given machines with given durations,
-one operation at a time per machine, the makespan minimised. The reference is the tabu-search line (Nowicki and
-Smutnicki, Zhang et al., Peng, Lü and Cheng) for the search and CP-SAT for the open-source incumbent; the objective
-is where the first two classes' lessons stop: a longest path, not a sum.
+one operation at a time per machine, the makespan minimised. The state of the art is the tabu-search line (Nowicki
+and Smutnicki, Zhang et al., Peng, Lü and Cheng, Li, Hao and Wu) on the classic instances and the
+constraint-programming solvers on the industrial sizes and the bounds; the objective is where the first two classes'
+lessons stop: a longest path, not a sum.
 
 - **The state.** The order of the jobs on every machine, with every operation's head (the longest path from the
   start to it) and tail (from its end to the finish): the makespan is the longest head plus duration plus tail, and
