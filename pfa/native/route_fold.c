@@ -167,14 +167,15 @@ double pfa_route_fold(int nc, int m, const double *x, const double *y, int round
 // result into the best and the child descended; the best feasible kept. best_io holds the best cycle in and out
 // (*best_len INFINITY on the first call: the first restart's result is taken). nn: nc x K candidates (0-based).
 // Returns the restarts whose own result or fold improved the best.
-// PFA's loop on routes. A pool of P solutions, the best distinct ones by cost and by distance to the others (HGS's
-// biased fitness: the member whose cost rank plus closeness rank is worst leaves when a newcomer is better placed).
-// A restart is a child of two members, each the better of two drawn at random, by Vidal's ordered crossover (a random
-// stretch of one's customer order, the rest in the other's order) through Split; every fourth restart is instead a
-// walk along the candidate edges biased to a member's route edges, which keeps the pool apart. The result is descended
-// from its departures, repaired at ten times the penalty when infeasible, folded by edge assembly into the best and
-// into the member it came from, each child descended from the parent it leaves; every feasible result and child is
-// offered to the pool. The pool's pairwise distances (route edges of one not in the other) are kept in dm (P x P).
+// PFA's loop on routes. A pool of P solutions, kept the best distinct ones by cost and by distance to the others: the
+// pool takes a generation of G newcomers (or none) and is culled to P by Vidal's biased fitness, the rank by cost plus
+// the rank by closeness (the mean distance to the five nearest), clones first. A restart is a child of two members,
+// each the better by cost of two drawn at random, by Vidal's ordered crossover (a random stretch of one's customer
+// order, the rest in the other's order) through Split; every fourth restart is instead a walk along the candidate
+// edges biased to a member's route edges, which keeps the pool apart. The result is descended from its departures,
+// repaired at ten times the penalty when infeasible, folded by edge assembly into the best and into the member it
+// came from, each child descended from the parent it leaves; every feasible result and child is offered to the pool.
+// The pool's pairwise distances (route edges of one not in the other) are kept in dm ((P + G)^2).
 static int pool_dist(int nc, int m, const int *a, const int *b, int *bn) {
     const int n = nc + m;
     for (int p = 0; p < n; p++) {
@@ -193,34 +194,74 @@ static int pool_dist(int nc, int m, const int *a, const int *b, int *bn) {
     return d;
 }
 
-static void pool_offer(int P, int nc, int m, int *pool, double *plen, const int *t, double len, int *bn, int *dm) {
-    const int n = nc + m;
-    for (int i = 0; i < P; i++) if (fabs(plen[i] - len) < 1e-9) return;   // the same length: taken as the same solution
-    int *dnew = malloc(sizeof(int) * P);
-    for (int i = 0; i < P; i++) dnew[i] = plen[i] < INFINITY ? pool_dist(nc, m, t, pool + (long)i * n, bn) : n;
-    int slot = -1;
-    for (int i = 0; i < P; i++) if (plen[i] == INFINITY) { slot = i; break; }
-    if (slot < 0) {   // full: the biased fitness over the P + 1, the worst leaves
-        const int P1 = P + 1;
-        int *close = malloc(sizeof(int) * P1);
-        for (int i = 0; i < P; i++) { close[i] = dnew[i]; for (int j = 0; j < P; j++) if (j != i && dm[i * P + j] < close[i]) close[i] = dm[i * P + j]; }
-        close[P] = n; for (int i = 0; i < P; i++) if (dnew[i] < close[P]) close[P] = dnew[i];
-        double worst = -1.0;
-        int w = -1;
-        for (int i = 0; i < P1; i++) {
-            double Li = i < P ? plen[i] : len;
-            int rc = 0, rd = 0;
-            for (int j = 0; j < P1; j++) { double Lj = j < P ? plen[j] : len; if (Lj < Li) rc++; if (close[j] > close[i]) rd++; }
-            double fit = (double)rc / P1 + (1.0 - 4.0 / P1) * (double)rd / P1;
-            if (fit > worst) { worst = fit; w = i; }
+// The biased fitness of the filled members among the PT slots: the cost rank plus the closeness rank, closeness the
+// mean distance to the five nearest others (Vidal's rule, the elite weight 4).
+static void pool_fitness(int PT, const double *plen, const int *dm, double *fit) {
+    double *close = malloc(sizeof(double) * PT);
+    int cnt = 0;
+    for (int i = 0; i < PT; i++) if (plen[i] < INFINITY) cnt++;
+    for (int i = 0; i < PT; i++) {
+        if (plen[i] == INFINITY) { fit[i] = -1.0; close[i] = 0.0; continue; }
+        int best[5], nb = 0;
+        for (int j = 0; j < PT; j++) {
+            if (j == i || plen[j] == INFINITY) continue;
+            int d = dm[i * PT + j];
+            if (nb == 5 && d >= best[nb - 1]) continue;
+            int q = nb < 5 ? nb++ : nb - 1;
+            while (q > 0 && d < best[q - 1]) { best[q] = best[q - 1]; q--; }
+            best[q] = d;
         }
-        free(close);
-        if (w == P) { free(dnew); return; }
+        double sum = 0.0;
+        for (int q = 0; q < nb; q++) sum += best[q];
+        close[i] = nb ? sum / nb : 0.0;
+    }
+    for (int i = 0; i < PT; i++) {
+        if (plen[i] == INFINITY) continue;
+        int rc = 0, rd = 0;
+        for (int j = 0; j < PT; j++) { if (plen[j] == INFINITY) continue; if (plen[j] < plen[i]) rc++; if (close[j] > close[i]) rd++; }
+        fit[i] = (double)rc / cnt + (1.0 - 4.0 / cnt) * (double)rd / cnt;
+    }
+    free(close);
+}
+
+// A newcomer joins a free slot of the P + G; when the G children of a generation are in, the pool is culled to P, a
+// clone first (a member at distance zero from another, the costlier), then the worst biased fitness. With G = 0 the
+// worst among the P + 1 leaves at once (measured better on the large instances, the generation on the small ones).
+static void pool_offer(int P, int G, int nc, int m, int *pool, double *plen, const int *t, double len, int *bn, int *dm) {
+    const int n = nc + m, PT = P + G;
+    for (int i = 0; i < PT; i++) if (fabs(plen[i] - len) < 1e-9) return;   // the same length: taken as the same solution
+    int slot = -1;
+    for (int i = 0; i < PT; i++) if (plen[i] == INFINITY) { slot = i; break; }
+    if (slot < 0) {   // full with no generation to wait for: the worst by biased fitness among the P + 1 leaves at once
+        const int P1 = PT + 1;
+        double *L = malloc(sizeof(double) * P1), *fit = malloc(sizeof(double) * P1);
+        int *dmx = malloc(sizeof(int) * P1 * P1);
+        for (int i = 0; i < PT; i++) {
+            L[i] = plen[i];
+            for (int j = 0; j < PT; j++) dmx[i * P1 + j] = dm[i * PT + j];
+            dmx[i * P1 + PT] = dmx[PT * P1 + i] = pool_dist(nc, m, t, pool + (long)i * n, bn);
+        }
+        L[PT] = len; dmx[PT * P1 + PT] = 0;
+        pool_fitness(P1, L, dmx, fit);
+        int w = 0;
+        for (int i = 1; i < P1; i++) if (fit[i] > fit[w]) w = i;
+        free(L); free(fit); free(dmx);
+        if (w == PT) return;
         slot = w;
     }
     plen[slot] = len; memcpy(pool + (long)slot * n, t, sizeof(int) * n);
-    for (int i = 0; i < P; i++) dm[slot * P + i] = dm[i * P + slot] = i == slot ? 0 : dnew[i];
-    free(dnew);
+    for (int i = 0; i < PT; i++) dm[slot * PT + i] = dm[i * PT + slot] = i == slot || plen[i] == INFINITY ? 0 : pool_dist(nc, m, t, pool + (long)i * n, bn);
+    int filled = 0;
+    for (int i = 0; i < PT; i++) filled += plen[i] < INFINITY;
+    if (filled < PT) return;
+    double *fit = malloc(sizeof(double) * PT);
+    while (filled > P) {
+        int w = -1;
+        for (int i = 0; i < PT && w < 0; i++) if (plen[i] < INFINITY) for (int j = 0; j < PT; j++) if (j != i && plen[j] < INFINITY && dm[i * PT + j] == 0) { w = plen[i] > plen[j] ? i : j; break; }
+        if (w < 0) { pool_fitness(PT, plen, dm, fit); for (int i = 0; i < PT; i++) if (plen[i] < INFINITY && (w < 0 || fit[i] > fit[w])) w = i; }
+        plen[w] = INFINITY; filled--;
+    }
+    free(fit);
 }
 
 static int pool_best(int P, const double *plen) { int b = 0; for (int i = 1; i < P; i++) if (plen[i] < plen[b]) b = i; return b; }
@@ -255,25 +296,26 @@ static void pool_edges(int nc, int m, const int *t, int *bn) {
 }
 
 // `restarts` restarts of the loop. nn: nc x K candidate customers (0-based); dist: the (nc + 1)^2 distance matrix with
-// the depot first, or NULL. pool, plen (INFINITY where empty) and dm persist across calls. Returns the restarts after
-// which the best changed.
+// the depot first, or NULL. The pool has P members and room for a generation of G more: pool ((P + G) x n), plen
+// (INFINITY where empty) and dm ((P + G)^2) persist across calls. Returns the restarts after which the best changed.
 int pfa_route_loop(int nc, int m, const double *x, const double *y, int round_mode, const int *demand, int Q, double lambda,
-                   int K, const int *nn, int restarts, uint64_t seed, double share, int P, int *pool, double *plen, int *dm, const double *dist) {
-    const int n = nc + m;
+                   int K, const int *nn, int restarts, uint64_t seed, double share, int P, int G, int *pool, double *plen, int *dm, const double *dist) {
+    const int n = nc + m, PT = P + G;
     int *order = malloc(sizeof(int) * nc), *t = malloc(sizeof(int) * n), *child = malloc(sizeof(int) * n), *bn = malloc(sizeof(int) * 2 * nc);
     unsigned char *taken = malloc(nc);
+    double *fit = malloc(sizeof(double) * PT);
     uint64_t rng = seed | 1;
     int improved = 0;
     double len, ex, lc, exc;
     long mv;
     for (int r = 0; r < restarts; r++) {
         int filled = 0;
-        for (int i = 0; i < P; i++) filled += plen[i] < INFINITY;
-        const int b = pool_best(P, plen);
+        for (int i = 0; i < PT; i++) filled += plen[i] < INFINITY;
+        const int b = pool_best(PT, plen);
         const double best0 = plen[b];
         int j = -1, j2 = -1;
-#define PICK(out) { int pick = (int)((tour_rng(&rng) >> 33) % (uint64_t)filled); for (int i = 0; i < P; i++) if (plen[i] < INFINITY && pick-- == 0) { out = i; break; } }
-        if (filled) {   // two parents, each the better of two drawn
+#define PICK(out) { int pick = (int)((tour_rng(&rng) >> 33) % (uint64_t)filled); for (int i = 0; i < PT; i++) if (plen[i] < INFINITY && pick-- == 0) { out = i; break; } }
+        if (filled) {   // two parents, each the better by cost of two drawn
             PICK(j); { int alt = j; PICK(alt); if (plen[alt] < plen[j]) j = alt; }
             if (filled >= 2) { do { PICK(j2); int alt = j2; PICK(alt); if (plen[alt] < plen[j2]) j2 = alt; } while (j2 == j); }
             pool_edges(nc, m, pool + (long)j * n, bn);
@@ -295,12 +337,12 @@ int pfa_route_loop(int nc, int m, const double *x, const double *y, int round_mo
                     pool_edges(nc, m, par, bn);
                     pfa_route_ls(nc, m, x, y, round_mode, demand, Q, lambda, K, nn, child, &lc, &exc, &mv, bn, dist);
                     if (exc > 0) pfa_route_ls(nc, m, x, y, round_mode, demand, Q, 10 * lambda, K, nn, child, &lc, &exc, &mv, NULL, dist);
-                    if (exc == 0) pool_offer(P, nc, m, pool, plen, child, lc, bn, dm);
+                    if (exc == 0) pool_offer(P, G, nc, m, pool, plen, child, lc, bn, dm);
                 }
             }
-            pool_offer(P, nc, m, pool, plen, t, len, bn, dm);
+            pool_offer(P, G, nc, m, pool, plen, t, len, bn, dm);
         }
-        if (plen[pool_best(P, plen)] < best0 - 1e-9) improved++;
+        if (plen[pool_best(PT, plen)] < best0 - 1e-9) improved++;
     }
     free(order); free(t); free(child); free(bn); free(taken);
     return improved;

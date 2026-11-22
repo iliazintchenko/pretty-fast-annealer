@@ -97,6 +97,7 @@ static int ls_try(LS *S, int u, int rv, int j) {
     const int inter = ru != rv;
     const int P = ls_city(RU, i - 1), N = ls_city(RU, i + 1), N2 = ls_city(RU, i + 2);
     const int v = ls_city(RV, j), Nv = ls_city(RV, j + 1), Pv = ls_city(RV, j - 1);
+    if (v == u) return 0;   // a customer against itself (a candidate list may hold it when coordinates coincide)
     const int du = S->dem[u], dv = j >= 0 ? S->dem[v] : 0;
     const int x = i + 1 < RU->len ? RU->seq[i + 1] : 0, dx = x ? S->dem[x] : 0;
     double g;
@@ -123,6 +124,15 @@ static int ls_try(LS *S, int u, int rv, int j) {
             memcpy(b, RU->seq + i + 1, sizeof(int) * lenT);
             memcpy(RU->seq + i + 1, RV->seq, sizeof(int) * RV->len); RU->len = i + 1 + RV->len;
             memcpy(RV->seq, b, sizeof(int) * lenT); RV->len = lenT;
+            ls_update(S, ru); ls_update(S, rv); S->moves++; return 1;
+        }
+        g = ls_d(S, u, 0) + ls_d(S, N, Nv) - ls_d(S, u, N) - ls_d(S, 0, Nv)   // the other 2-opt*: u's route ends at u, u's tail reversed goes before v's route
+            + ls_pen(S, RU->cum[i + 1]) + ls_pen(S, tailU + RV->load) - ls_pen(S, RU->load) - ls_pen(S, RV->load);
+        if (g < -1e-9) {
+            int *b = S->buf, lenT = RU->len - i - 1;
+            for (int q = 0; q < lenT; q++) b[q] = RU->seq[RU->len - 1 - q];
+            memmove(RV->seq + lenT, RV->seq, sizeof(int) * RV->len); memcpy(RV->seq, b, sizeof(int) * lenT); RV->len += lenT;
+            RU->len = i + 1;
             ls_update(S, ru); ls_update(S, rv); S->moves++; return 1;
         }
         return 0;
@@ -182,8 +192,8 @@ static int ls_try(LS *S, int u, int rv, int j) {
 }
 
 // SWAP* (Vidal): for two routes, a customer of each exchanged, each inserted at its best place in the other route
-// (its three best insertion points, or the place the other leaves), the best such exchange of the pair applied when it
-// improves. ins: per customer of r1 its three best insertion points in r2 (position after which, and cost).
+// (its three best insertion points, or the place the other leaves), or one customer moved to its best place in the
+// other route; the best such move of the pair applied when it improves. ins: per customer of r1 its three best insertion points in r2 (position after which, and cost).
 typedef struct { int p[3]; double c[3]; } Ins3;
 static void ls_ins3(const LS *S, int u, const Route *R, Ins3 *I) {
     for (int q = 0; q < 3; q++) { I->p[q] = -2; I->c[q] = INFINITY; }
@@ -221,14 +231,33 @@ static int ls_swapstar_pair(LS *S, int r1, int r2, Ins3 *I1, Ins3 *I2) {
             int v = B->seq[j], Pv = ls_city(B, j - 1), Nv = ls_city(B, j + 1);
             double rem_v = ls_d(S, Pv, v) + ls_d(S, v, Nv) - ls_d(S, Pv, Nv);
             double pen = ls_pen(S, A->load - S->dem[u] + S->dem[v]) + ls_pen(S, B->load - S->dem[v] + S->dem[u]) - ls_pen(S, A->load) - ls_pen(S, B->load);
-            double bound = -rem_u - rem_v + pen + I1[i].c[0] + I2[j].c[0];   // the cheapest conceivable
+            // the cheapest conceivable: the best insertion with the other still present, or in the other's place, which can be cheaper
+            double inpl_u = ls_d(S, Pv, u) + ls_d(S, u, Nv) - ls_d(S, Pv, Nv), inpl_v = ls_d(S, Pu, v) + ls_d(S, v, Nu) - ls_d(S, Pu, Nu);
+            double bound = -rem_u - rem_v + pen + (inpl_u < I1[i].c[0] ? inpl_u : I1[i].c[0]) + (inpl_v < I2[j].c[0] ? inpl_v : I2[j].c[0]);
             if (bound >= best) continue;
             int pu, pv;
             double g = -rem_u - rem_v + pen + ls_best_ins(S, u, B, &I1[i], j, &pu) + ls_best_ins(S, v, A, &I2[j], i, &pv);
             if (g < best) { best = g; bi = i; bj = j; bpu = pu; bpv = pv; }
         }
     }
-    if (bi < 0) return 0;
+    // the one-sided relocations at the best insertion point, which Vidal's SWAP* includes: the point need not touch a
+    // candidate of the customer, so the move reaches what the relocate over the candidates does not
+    int reloc = 0;   // 1: u from A into B after bpu; 2: v from B into A after bpv
+    for (int i = 0; i < A->len; i++) {
+        int u = A->seq[i], Pu = ls_city(A, i - 1), Nu = ls_city(A, i + 1);
+        double g = ls_d(S, Pu, Nu) - ls_d(S, Pu, u) - ls_d(S, u, Nu) + I1[i].c[0]
+                   + ls_pen(S, A->load - S->dem[u]) + ls_pen(S, B->load + S->dem[u]) - ls_pen(S, A->load) - ls_pen(S, B->load);
+        if (g < best) { best = g; bi = i; bj = -1; bpu = I1[i].p[0]; reloc = 1; }
+    }
+    for (int j = 0; j < B->len; j++) {
+        int v = B->seq[j], Pv = ls_city(B, j - 1), Nv = ls_city(B, j + 1);
+        double g = ls_d(S, Pv, Nv) - ls_d(S, Pv, v) - ls_d(S, v, Nv) + I2[j].c[0]
+                   + ls_pen(S, B->load - S->dem[v]) + ls_pen(S, A->load + S->dem[v]) - ls_pen(S, A->load) - ls_pen(S, B->load);
+        if (g < best) { best = g; bj = j; bi = -1; bpv = I2[j].p[0]; reloc = 2; }
+    }
+    if (bi < 0 && bj < 0) return 0;
+    if (reloc == 1) { int u = A->seq[bi]; ls_remove(A, bi, 1); ls_insert(B, bpu + 1, &u, 1); ls_update(S, r1); ls_update(S, r2); S->moves++; return 1; }
+    if (reloc == 2) { int v = B->seq[bj]; ls_remove(B, bj, 1); ls_insert(A, bpv + 1, &v, 1); ls_update(S, r1); ls_update(S, r2); S->moves++; return 1; }
     int u = A->seq[bi], v = B->seq[bj];
     ls_remove(A, bi, 1); ls_remove(B, bj, 1);
     if (bpv >= bi) bpv--;   // insertion points on the arrays without u / v
@@ -252,9 +281,9 @@ static int ls_swapstar(LS *S, int *pair_tested, Ins3 *I1, Ins3 *I2) {
                 int u = S->R[r1].seq[i];
                 for (int k = 0; k < S->K; k++) if (S->rof[S->nn[(u - 1) * S->K + k]] == r2) { near = 1; break; }
             }
-            if (!near) { *t = S->clock; continue; }
+            *t = S->clock;   // stamped before the test: an exchange applied bumps the routes' stamps past it, so the pair is tried again
+            if (!near) continue;
             if (ls_swapstar_pair(S, r1, r2, I1, I2)) any = 1;
-            *t = S->clock;
         }
     }
     return any;
@@ -281,6 +310,7 @@ static long ls_run(LS *S) {
                     else if (ls_try(S, v, S->rof[u], S->pof[u])) moved = 1;
                     else if (rv != S->rof[u] && ls_try(S, u, rv, -1)) moved = 1;
                 }
+                if (!moved) moved = ls_try(S, u, S->rof[u], -1);   // u, or u and x, to the start of its own route
                 if (!moved && S->pass) {   // one empty route, as the depot candidate
                     for (int r = 0; r < S->m; r++) if (S->R[r].len == 0) { if (ls_try(S, u, r, -1)) moved = 1; break; }
                 }
@@ -413,7 +443,7 @@ int pfa_route_split(int nc, int m, const double *x, const double *y, int round_m
 // unvisited candidate that is a neighbour in bn (2 per customer, -1 for none: the best cycle's route edges) with
 // probability share when there is one, else a random unvisited candidate, else the nearest unvisited customer.
 void pfa_route_walk(int nc, const double *x, const double *y, int K, const int *nn, const int *bn, double share, uint64_t seed, int *order) {
-    int *left = malloc(sizeof(int) * nc), *at = malloc(sizeof(int) * nc);
+    int *left = malloc(sizeof(int) * nc), *at = malloc(sizeof(int) * nc), *free_ = malloc(sizeof(int) * K), *kept = malloc(sizeof(int) * K);
     unsigned char *seen = calloc(nc, 1);
     for (int c = 0; c < nc; c++) { left[c] = c; at[c] = c; }
     int nleft = nc;
@@ -423,7 +453,7 @@ void pfa_route_walk(int nc, const double *x, const double *y, int K, const int *
         order[p] = cur; seen[cur] = 1;
         int l = at[cur]; nleft--; left[l] = left[nleft]; at[left[l]] = l;
         if (p == nc - 1) break;
-        int free_[32], kept[32], nf = 0, nk = 0;
+        int nf = 0, nk = 0;
         for (int k = 0; k < K; k++) {
             int c = nn[cur * K + k];
             if (c >= nc || seen[c]) continue;
@@ -442,5 +472,5 @@ void pfa_route_walk(int nc, const double *x, const double *y, int K, const int *
             cur = bestc;
         }
     }
-    free(left); free(at); free(seen);
+    free(free_); free(kept); free(left); free(at); free(seen);
 }

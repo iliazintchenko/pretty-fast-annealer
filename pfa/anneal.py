@@ -159,7 +159,7 @@ _lib.pfa_tour_fold.restype = ctypes.c_double
 _lib.pfa_tour_ipt.argtypes = [ctypes.c_int, _f64, _f64, ctypes.c_int, _i32, _i32, _i32]
 _lib.pfa_tour_ipt.restype = ctypes.c_double
 _lib.pfa_route_loop.argtypes = [ctypes.c_int, ctypes.c_int, _f64, _f64, ctypes.c_int, _i32, ctypes.c_int, ctypes.c_double, ctypes.c_int, _i32,
-                                ctypes.c_int, ctypes.c_uint64, ctypes.c_double, ctypes.c_int, _i32, _f64, _i32, _f64]
+                                ctypes.c_int, ctypes.c_uint64, ctypes.c_double, ctypes.c_int, ctypes.c_int, _i32, _f64, _i32, ctypes.c_void_p]
 _lib.pfa_route_loop.restype = ctypes.c_int
 _lib.pfa_from_one_hot.argtypes = [
     _f64_2d,  # one-hot couplings over all slots
@@ -1252,6 +1252,7 @@ class _Tour:
 
 ROUTE_CANDIDATES = 20   # candidates per customer for the route moves: the nearest customers
 ROUTE_POOL = 24         # the loop's pool of solutions
+ROUTE_GEN = 0           # a generation taken in before the pool is culled to ROUTE_POOL; 0 replaces at once
 ROUTE_FLEET = 1.3       # depot copies: ceil(ROUTE_FLEET * total demand / capacity) + 3, the fleet the routes may use
 
 
@@ -1293,20 +1294,26 @@ class _Routes:
         self.x = np.ascontiguousarray(np.concatenate([points[1:, 0], np.full(m, points[0, 0])]))
         self.y = np.ascontiguousarray(np.concatenate([points[1:, 1], np.full(m, points[0, 1])]))
         self.demand = np.ascontiguousarray(np.concatenate([demands[1:], np.zeros(m, dtype=np.int64)]).astype(np.int32))
-        d = np.sqrt(((points[:, None, :] - points[None, :, :]) ** 2).sum(-1))
-        self.D = np.ascontiguousarray(np.floor(d + 0.5) if round_mode == 1 else np.ceil(d) if round_mode == 2 else d)
-        cust = self.D[1:, 1:].copy()
-        np.fill_diagonal(cust, np.inf)
+        if nc <= 3000:   # the distance matrix for the kernel; beyond that the kernel computes distances
+            d = np.sqrt(((points[:, None, :] - points[None, :, :]) ** 2).sum(-1))
+            self.D = np.ascontiguousarray(np.floor(d + 0.5) if round_mode == 1 else np.ceil(d) if round_mode == 2 else d)
+            maxd = self.D.max()
+        else:
+            self.D = None
+            maxd = float(np.sqrt(((points.max(0) - points.min(0)) ** 2).sum()))
         self.K = min(ROUTE_CANDIDATES, nc - 1)
-        self.nn = np.ascontiguousarray(np.argsort(cust, axis=1)[:, :self.K].astype(np.int32).reshape(-1))
-        self.lam = float(min(max(self.D.max() / demands[1:].max(), 0.1), 1000.0))   # the penalty per unit of excess load
-        self.P = ROUTE_POOL
-        self.pool, self.plen = np.zeros(self.P * (nc + m), dtype=np.int32), np.full(self.P, np.inf)
-        self.dm = np.zeros(self.P * self.P, dtype=np.int32)
+        from scipy.spatial import cKDTree
+        q = cKDTree(points[1:]).query(points[1:], k=self.K + 1)[1]   # the nearest customers, itself dropped (coordinates may coincide)
+        self.nn = np.ascontiguousarray(np.array([[c for c in row if c != i][:self.K] for i, row in enumerate(q)]).astype(np.int32).reshape(-1))
+        self.lam = float(min(max(maxd / demands[1:].max(), 0.1), 1000.0))   # the penalty per unit of excess load
+        self.P, self.G = ROUTE_POOL, ROUTE_GEN
+        PT = self.P + self.G
+        self.pool, self.plen = np.zeros(PT * (nc + m), dtype=np.int32), np.full(PT, np.inf)
+        self.dm = np.zeros(PT * PT, dtype=np.int32)
 
     def loop(self, restarts, rng):
         return _lib.pfa_route_loop(self.nc, self.m, self.x, self.y, self.round_mode, self.demand, self.Q, self.lam, self.K, self.nn,
-                                   restarts, int(rng.integers(1, 2**63)), WALK_SHARE, self.P, self.pool, self.plen, self.dm, self.D.reshape(-1))
+                                   restarts, int(rng.integers(1, 2**63)), WALK_SHARE, self.P, self.G, self.pool, self.plen, self.dm, None if self.D is None else self.D.ctypes.data)
 
     def best_routes(self):
         n = self.nc + self.m

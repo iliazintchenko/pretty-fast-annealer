@@ -236,9 +236,21 @@ permutation the cycles are those of a⁻¹b, and the result is again the lowest 
 form a cycle is one choice among several, which loses choices and nothing else. Elimination does not apply: a value
 is dominated only against the states that keep the counts.
 
-## Compared with simulated annealing
+## Each class against its own solver
 
-SA here follows Isakov et al.,
+The claim PFA is built to test: one solver, with the problem mapped to its native state and moves, matches or beats
+the best solver of each class of hard problem at equal wall time on one core. The parts that carry from class to
+class are the loop, a kernel run cold, restarts that keep what the best state has, a fold of two states into one, and
+one budget number. The kernel is whatever move the class demands, and is usually the move the class's own best
+solver already uses: the Boltzmann step over spins, Taillard's exchange update on quadratic assignment, Lin and
+Kernighan's chain on tours, the route moves of the hybrid genetic search on routes. The reference is therefore
+different for every class: optimised simulated annealing on spin glasses, robust tabu search and the memetic
+algorithms on quadratic assignment, LKH on tours, HGS-CVRP on routes. The sections below say what is mapped how and
+what is whose; the measurements live with the problem sets.
+
+### Spin glasses: the step against Metropolis
+
+On spin glasses the reference is simulated annealing as Isakov et al. optimised it,
 [Optimised simulated annealing for Ising spin glasses](https://arxiv.org/abs/1401.1084), built like PFA's
 implementation: full float64 coupling rows, one replica, one core. The paper's tricks for low-precision couplings,
 many replicas or sparse graphs (lookup tables, multi-spin coding, bipartite updates) are left out on both sides, and
@@ -246,16 +258,10 @@ so is PFA's own storage for sparse couplings.
 
 SA proposes one spin at a time and accepts the flip with probability min(1, e^(−β ΔE_j)). As the anneal cools, it
 rejects almost every proposal; PFA never rejects. The comparison is of this step: the scan, the restarts, elimination
-and recombination sit outside it and would apply to either method.
-
-Each method ran with its final inverse temperature tuned for every length of anneal, on spin problems. A PFA flip
-costs **1.2–1.4×** an accepted SA flip; a rejected SA proposal costs about 1/n of an accepted flip. With flips and
-rejected proposals both counted, PFA reaches the same energy in less work by:
-
-| problems | speedup |
-|---|---|
-| spin glasses | **1.5–2×** |
-| constrained problems with large penalties | **15–1000×**, or SA never reaches that energy |
+and recombination sit outside it and would apply to either method. With each method's final inverse temperature
+tuned for every length of anneal, and flips and rejected proposals both counted, PFA reaches the same energy in less
+work: by a constant factor on spin glasses, and by orders of magnitude, or where SA never reaches that energy at all,
+on constrained problems with large penalties. The reasons:
 
 **Cost per step.** A flip in either method updates all n local fields. Per spin, an accepted SA flip moves 24 bytes:
 a float64 coupling read, a float64 field read and written. A PFA flip also reads the spin and a stored random number
@@ -606,12 +612,16 @@ tour's lessons stop carrying over.
   behind on both quality and time, and no rule of its enumeration closed the gap.
 - **The move.** The kernel (`route.c`) is the local search of the moves native to routes, each evaluated in constant
   time with the loads first: a customer or a pair relocated after another, as is or reversed; two customers or pairs
-  swapped; a route's path reversed; the tails of two routes exchanged, as they are or reversed; and SWAP*, two
-  customers exchanged between routes and each inserted where it fits best in the other. The candidates are each
-  customer's nearest customers. A route's load over the capacity is penalised per unit, and a result over the capacity
-  is descended again at ten times the penalty. A customer is tested against its candidates until no move improves,
-  a route's change re-activating the tests that touch it. That move set is Vidal's, and on identical starts it lands
-  at or below the reference's local search at the same cost per descent.
+  swapped; a route's path reversed; the tails of two routes exchanged, as they are or reversed, a tail taking a whole
+  route when the exchange is at a depot; and SWAP*, two customers exchanged between routes and each inserted where it
+  fits best in the other, or one customer moved to where it fits best in the other route, a place that need not touch
+  any of its candidates. The candidates are each customer's nearest customers. A route's load over the capacity is
+  penalised per unit, and a result over the capacity is descended again at ten times the penalty. A customer is tested
+  against its candidates until no move improves, a route's change re-activating the tests that touch it, a pair of
+  routes re-tested for SWAP* when either changed since. That move set is Vidal's. On identical random starts it lands
+  at or below the reference's local search at the same cost per descent; on identical crossover children of a good
+  pool, the starts a minute's search is made of, the reference landed lower until the last three moves above were
+  added, and still descends faster, which is where the reference keeps an edge on the smallest instances.
 - **The fold.** Edge assembly on the graph with the depot as one node: two route sets differ in alternating cycles,
   the smallest of which, six edges, is a customer moved from one route to another, and the next a tail exchange; one
   cycle applied to the better set gives a child when every resulting cycle passes through the depot, and the child is
@@ -620,12 +630,15 @@ tour's lessons stop carrying over.
 - **The loop.** PFA's loop with one change: a pool of solutions instead of the one best. On tours the restart's walk
   from the best tour gave the fold a partner it could use; on routes a restart from the one best, walked or descended,
   is too far from it, and the fold's gains ran out at a plateau the reference passes. The pool holds the best distinct
-  solutions by cost and by distance to the others (a solution leaves when its ranks in both are worst together,
-  Vidal's rule), a restart is a child of two members, each the better of two drawn, by ordered crossover of their
-  customer orders through Split, Prins's optimal cut of an order into routes, or every fourth time a walk along the
-  candidate edges biased to a member's routes, which keeps the pool apart; the result is descended, folded into the
-  best and into the member it came from, and the result and both children are offered to the pool. The budget is the
-  number of restarts.
+  solutions by cost and by distance to the others: a newcomer takes the place of the member whose rank by cost plus
+  rank by closeness to the five nearest is worst (Vidal's rule), unless that is the newcomer. A restart is a child of
+  two members, each the better by cost of two drawn, by ordered crossover of their customer orders through Split,
+  Prins's optimal cut of an order into routes, or every fourth time a walk along the candidate edges biased to a
+  member's routes, which keeps the pool apart; the result is descended, folded into the best and into the member it
+  came from, and the result and both children are offered to the pool. The budget is the number of restarts. Two of
+  the reference's pieces measured as no gain here and are not run: a second pool of infeasible solutions with the
+  penalty adapted to keep a share of the results feasible, and a generation of newcomers taken in before the pool is
+  culled, which helped the smallest instances and cost the largest.
 
 The kernel is Vidal's, the fold is Nagata's in Nagata and Bräysy's setting, the cut is Prins's and the crossover
 Vidal's; the pool is the hybrid genetic search's population in PFA's clothes. What is PFA's on routes is the fold and
