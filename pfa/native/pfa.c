@@ -13,6 +13,10 @@
 //   alpha.c                the candidate edges of a tour problem by alpha-nearness: pfa_tour_alpha()
 //   tour_fold.c            edge assembly between two tours, one fold for tours: pfa_tour_fold()
 //   tour_ipt.c             partial transcription between two tours, the other: pfa_tour_ipt()
+//   route.c                vehicle routes: the kernel of route moves at zero temperature, pfa_route_ls(); Split,
+//                          pfa_route_split(); the walk over the customers, pfa_route_walk()
+//   route_fold.c           edge assembly on the graph with the depot as one node, pfa_route_fold(); the loop with
+//                          the pool, pfa_route_loop()
 //   eliminate.c           categorical variables: pfa_eliminate(), before the anneal
 //   fold.c                 pfa_fold_spin(), pfa_fold_sparse_spin(), pfa_fold_categorical(), pfa_fold_swap(): one
 //                          state takes from another every part that it has lower, between the repetitions
@@ -145,5 +149,7 @@ const char *pfa_simd_path(void) { return SIMD_PATH; }
 #include "alpha.c"
 #include "tour_fold.c"
 #include "tour_ipt.c"
+#include "route.c"
+#include "route_fold.c"
 #include "eliminate.c"
 #include "fold.c"

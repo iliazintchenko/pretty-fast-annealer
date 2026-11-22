@@ -591,13 +591,53 @@ for a few others. The mapping has two parts, and the solver's rule enters at the
 The kernel is Lin and Kernighan's and the folds are Möbius's and Nagata's; the candidates are the problem's. What is
 PFA's on tours is the loop that holds them under one number.
 
+### Routes
+
+`pfa.route()` solves the capacitated vehicle routing problem: customers in the plane with demands, one depot, vehicles
+of one capacity, the routes of least total length. Its native state is a set of routes, and the mapping is where the
+tour's lessons stop carrying over.
+
+- **The state.** A set of routes is one cycle through the customers and a fleet of copies of the depot, a route the
+  stretch between two copies and an empty route two copies side by side, so the tour's structure and its generic
+  exchange carry over as they are. What does not carry over is the move. Under a tight capacity nearly every
+  sequential exchange across routes is infeasible, and a chain learns it only after the exchange is checked; the moves
+  that carry the problem, two customers exchanged between routes, are non-sequential, two alternating cycles at once.
+  Measured against the reference's local search on identical starts, the chain on this cycle was an order of magnitude
+  behind on both quality and time, and no rule of its enumeration closed the gap.
+- **The move.** The kernel (`route.c`) is the local search of the moves native to routes, each evaluated in constant
+  time with the loads first: a customer or a pair relocated after another, as is or reversed; two customers or pairs
+  swapped; a route's path reversed; the tails of two routes exchanged, as they are or reversed; and SWAP*, two
+  customers exchanged between routes and each inserted where it fits best in the other. The candidates are each
+  customer's nearest customers. A route's load over the capacity is penalised per unit, and a result over the capacity
+  is descended again at ten times the penalty. A customer is tested against its candidates until no move improves,
+  a route's change re-activating the tests that touch it. That move set is Vidal's, and on identical starts it lands
+  at or below the reference's local search at the same cost per descent.
+- **The fold.** Edge assembly on the graph with the depot as one node: two route sets differ in alternating cycles,
+  the smallest of which, six edges, is a customer moved from one route to another, and the next a tail exchange; one
+  cycle applied to the better set gives a child when every resulting cycle passes through the depot, and the child is
+  descended from where it differs. On pairs where ordered crossover improved the best set once in forty, this fold did
+  in forty of forty.
+- **The loop.** PFA's loop with one change: a pool of solutions instead of the one best. On tours the restart's walk
+  from the best tour gave the fold a partner it could use; on routes a restart from the one best, walked or descended,
+  is too far from it, and the fold's gains ran out at a plateau the reference passes. The pool holds the best distinct
+  solutions by cost and by distance to the others (a solution leaves when its ranks in both are worst together,
+  Vidal's rule), a restart is a child of two members, each the better of two drawn, by ordered crossover of their
+  customer orders through Split, Prins's optimal cut of an order into routes, or every fourth time a walk along the
+  candidate edges biased to a member's routes, which keeps the pool apart; the result is descended, folded into the
+  best and into the member it came from, and the result and both children are offered to the pool. The budget is the
+  number of restarts.
+
+The kernel is Vidal's, the fold is Nagata's in Nagata and Bräysy's setting, the cut is Prins's and the crossover
+Vidal's; the pool is the hybrid genetic search's population in PFA's clothes. What is PFA's on routes is the fold and
+the loop under one number, and the finding that the one-best loop that carries tours does not carry routes.
+
 ## Usage
 
 `make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the six kernels: `spin.c`,
 `categorical.c` and `swap.c` for couplings as an array, and `sparse_spin.c`, `sparse_categorical.c` and
 `sparse_swap.c`, which draw from the tree of sums of `sums.c`; `eliminate.c` and `fold.c`; and for tours `tour.c`,
-`tour_chain.c`, `alpha.c`, `tour_fold.c` and `tour_ipt.c`. The three array kernels use the one SIMD path that
-matches the machine; the rest is the same code on every path:
+`tour_chain.c`, `alpha.c`, `tour_fold.c` and `tour_ipt.c`; and for routes `route.c` and `route_fold.c`. The three
+array kernels use the one SIMD path that matches the machine; the rest is the same code on every path:
 
 | path | files | used on |
 |---|---|---|
@@ -636,7 +676,11 @@ coordinates, as the order of the cities (int64). `num_steps` is the budget, the 
 descent running whole; `rounding` is `None` for Euclidean distances, `"nint"` for TSPLIB's EUC_2D (distances rounded to
 the nearest integer) or `"ceil"` for CEIL_2D (see Tours).
 
+`pfa.route(points, demands, capacity, num_steps, seed, rounding)` returns vehicle routes, lists of customer indices,
+for `points` (n × 2 coordinates, the depot first), `demands` (n, zero at the depot) and a vehicle's `capacity`, the
+number of routes free. `num_steps` is the budget, the number of restarts; `rounding` as for tours (see Routes).
+
 `examples/spins.py` solves a small problem given over 0/1 variables, `examples/colouring.py` colours a graph with
 several values per variable, `examples/qap.py` solves a quadratic assignment and `examples/partition.py` cuts a graph
-in two equal parts, both by exchanges, `examples/tour.py` finds a tour through random points, and
-`examples/throughput.py` measures steps per second.
+in two equal parts, both by exchanges, `examples/tour.py` finds a tour through random points, `examples/route.py`
+routes vehicles from a depot to random customers, and `examples/throughput.py` measures steps per second.
