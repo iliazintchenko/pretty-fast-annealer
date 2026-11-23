@@ -18,6 +18,7 @@ typedef struct {
     const int *mach, *dur;       // per operation
     int *opof;                   // opof[k*n + j]: the operation of job j on machine k
     int *seq, *pos;              // seq[k*n + p]: job; pos[o]: position of o on its machine
+    int *mpred, *msucc;          // the machine predecessor and successor of every operation (-1 at the ends), kept with seq
     int *r, *q, *topo, *indeg;   // heads, tails, a topological order, work
     int *mark, *set;             // the incremental recompute's stamps and the affected set
     int stamp, incr;             // incr: recompute incrementally after a move (large instances)
@@ -30,17 +31,19 @@ static int shop_incr_threshold = 0x7fffffff;   // operations from which a move's
                                                 // reach measured 94-97% of the operations at 10,000-100,000 of them and the full pass is twice as fast
 static int shop_tabu_mode = 0;             // 0: the arc tabu (reversed arcs, tenure L..1.5L); 1: the hash tabu (visited solutions)
 static int shop_all_ends = 0;              // 1: no front/back exclusion of N7 moves (the path is a truncated window segment)
+#define SHOP_STARTS 8                       // non-delay draws the first schedule is the best of
 static long shop_kick = 1000;              // a random move after this many iterations without a new best (Xie et al.'s rule has 200; 1000 measured better; 0: never)
 void pfa_shop_knob(int incr_threshold) { shop_incr_threshold = incr_threshold; }
 void pfa_shop_kick(long kick) { shop_kick = kick; }
 void pfa_shop_tabu_mode(int mode) { shop_tabu_mode = mode; }
 
+static inline uint64_t shop_seed(uint64_t seed) { return (seed << 1) | 1; }   // an odd state per seed, distinct seeds distinct (or-ing in the low bit made seeds 2k and 2k+1 the same)
 static inline uint64_t shop_rng(uint64_t *s) { *s ^= *s >> 12; *s ^= *s << 25; *s ^= *s >> 27; return *s * 2685821657736338717ULL; }
 
 static inline int shop_jp(const Shop *S, int o) { return o % S->m ? o - 1 : -1; }
 static inline int shop_js(const Shop *S, int o) { return (o + 1) % S->m ? o + 1 : -1; }
-static inline int shop_mp(const Shop *S, int o) { int k = S->mach[o], p = S->pos[o]; return p ? S->opof[k * S->n + S->seq[k * S->n + p - 1]] : -1; }
-static inline int shop_ms(const Shop *S, int o) { int k = S->mach[o], p = S->pos[o]; return p + 1 < S->n ? S->opof[k * S->n + S->seq[k * S->n + p + 1]] : -1; }
+static inline int shop_mp(const Shop *S, int o) { return S->mpred[o]; }
+static inline int shop_ms(const Shop *S, int o) { return S->msucc[o]; }
 static inline int shop_end(const Shop *S, int o) { return o < 0 ? 0 : S->r[o] + S->dur[o]; }          // r + p, 0 for none
 static inline int shop_tail(const Shop *S, int o) { return o < 0 ? 0 : S->q[o] + S->dur[o]; }         // q + p, 0 for none
 
@@ -107,14 +110,23 @@ static int shop_eval_incr(Shop *S, const int *X, int nx) {
     return 1;
 }
 
-static void shop_index(Shop *S) {
-    for (int k = 0; k < S->m; k++) for (int p = 0; p < S->n; p++) S->pos[S->opof[k * S->n + S->seq[k * S->n + p]]] = p;
+// Positions and machine neighbours of the operations at positions lo..hi of machine k refreshed from seq.
+static void shop_reindex(Shop *S, int k, int lo, int hi) {
+    const int n = S->n, *sq = S->seq + k * n, *op = S->opof + k * n;
+    for (int p = lo; p <= hi; p++) {
+        int o = op[sq[p]];
+        S->pos[o] = p;
+        S->mpred[o] = p ? op[sq[p - 1]] : -1;
+        S->msucc[o] = p + 1 < n ? op[sq[p + 1]] : -1;
+    }
 }
+static void shop_index(Shop *S) { for (int k = 0; k < S->m; k++) shop_reindex(S, k, 0, S->n - 1); }
 
 static Shop *shop_new(int n, int m, const int *mach, const int *dur, const int *seq) {
     Shop *S = calloc(1, sizeof(Shop));
     S->n = n; S->m = m; S->N = n * m; S->mach = mach; S->dur = dur;
     S->opof = malloc(sizeof(int) * n * m); S->seq = malloc(sizeof(int) * n * m); S->pos = malloc(sizeof(int) * n * m);
+    S->mpred = malloc(sizeof(int) * n * m); S->msucc = malloc(sizeof(int) * n * m);
     S->r = malloc(sizeof(int) * n * m); S->q = malloc(sizeof(int) * n * m); S->topo = malloc(sizeof(int) * n * m); S->indeg = malloc(sizeof(int) * n * m);
     S->mark = calloc(n * m, sizeof(int)); S->set = malloc(sizeof(int) * n * m); S->stamp = 0; S->incr = n * m >= shop_incr_threshold; S->affected = 0;
     for (int o = 0; o < n * m; o++) S->opof[mach[o] * n + o / m] = o;
@@ -122,7 +134,7 @@ static Shop *shop_new(int n, int m, const int *mach, const int *dur, const int *
     return S;
 }
 
-static void shop_free(Shop *S) { free(S->opof); free(S->seq); free(S->pos); free(S->r); free(S->q); free(S->topo); free(S->indeg); free(S->mark); free(S->set); free(S); }
+static void shop_free(Shop *S) { free(S->opof); free(S->seq); free(S->pos); free(S->mpred); free(S->msucc); free(S->r); free(S->q); free(S->topo); free(S->indeg); free(S->mark); free(S->set); free(S); }
 
 // The makespan of the machine orders, or -1 when cyclic. r_out, q_out (n*m each) may be NULL.
 int pfa_shop_makespan(int n, int m, const int *mach, const int *dur, const int *seq, int *r_out, int *q_out) {
@@ -134,10 +146,12 @@ int pfa_shop_makespan(int n, int m, const int *mach, const int *dur, const int *
     return c;
 }
 
-// Giffler and Thompson's active schedules with a random choice in the conflict set: the schedulable operation with
-// the earliest completion fixes the machine and the time c*; among that machine's schedulable operations that could
-// start before c*, one is drawn at random and scheduled. A heap over the jobs keyed by their next operation's earliest
-// completion, re-keyed (lazily, by version) only for the jobs waiting on the machine just used. Writes the machine orders.
+// Giffler and Thompson's active schedules: the schedulable operation with the earliest completion fixes the machine
+// and the time c*; among that machine's schedulable operations that could start before c* (the conflict set) one is
+// scheduled: `rule` 0 draws it at random (the pool's diversity), 1 takes the one that can start earliest, ties at
+// random (the non-delay schedule; a third of the gap less than the random choice on the million-operation instance,
+// 0.13 s). A heap over the jobs keyed by their next operation's earliest completion, re-keyed (lazily, by version)
+// only for the jobs waiting on the machine just used. Writes the machine orders.
 typedef struct { long key; int job, ver; } GtItem;
 static void gt_push(GtItem *h, int *hn, GtItem it) {
     int i = (*hn)++; h[i] = it;
@@ -149,12 +163,12 @@ static GtItem gt_pop(GtItem *h, int *hn) {
     for (;;) { int l = 2 * i + 1, r = l + 1, sm = i; if (l < *hn && h[l].key < h[sm].key) sm = l; if (r < *hn && h[r].key < h[sm].key) sm = r; if (sm == i) break; GtItem t = h[sm]; h[sm] = h[i]; h[i] = t; i = sm; }
     return top;
 }
-void pfa_shop_gt(int n, int m, const int *mach, const int *dur, uint64_t seed, int *seq_out) {
+void pfa_shop_gt(int n, int m, const int *mach, const int *dur, uint64_t seed, int rule, int *seq_out) {
     int *next = calloc(n, sizeof(int)), *jfree = calloc(n, sizeof(int)), *mfree = calloc(m, sizeof(int)), *fill = calloc(m, sizeof(int));
     int *ver = calloc(n, sizeof(int)), *wait = malloc(sizeof(int) * n), *wnext = malloc(sizeof(int) * n), *whead = malloc(sizeof(int) * m), *wprev = malloc(sizeof(int) * n);
     GtItem *heap = malloc(sizeof(GtItem) * (size_t)(n * m + n)); int hn = 0;
     int *cand = malloc(sizeof(int) * n);
-    uint64_t rng = seed | 1;
+    uint64_t rng = shop_seed(seed);
     for (int k = 0; k < m; k++) whead[k] = -1;
 #define WAIT_ADD(j, k) { wnext[j] = whead[k]; wprev[j] = -1; if (whead[k] >= 0) wprev[whead[k]] = j; whead[k] = j; wait[j] = k; }
 #define WAIT_DEL(j) { int k_ = wait[j]; if (wprev[j] >= 0) wnext[wprev[j]] = wnext[j]; else whead[k_] = wnext[j]; if (wnext[j] >= 0) wprev[wnext[j]] = wprev[j]; }
@@ -166,7 +180,14 @@ void pfa_shop_gt(int n, int m, const int *mach, const int *dur, uint64_t seed, i
         int best = it.job, k = mach[best * m + next[best]]; long bc = it.key;
         int nc = 0;
         for (int j = whead[k]; j >= 0; j = wnext[j]) { int s0 = jfree[j] > mfree[k] ? jfree[j] : mfree[k]; if (s0 < bc) cand[nc++] = j; }
-        int j = cand[(int)((shop_rng(&rng) >> 33) % (uint64_t)nc)], o = j * m + next[j];
+        if (rule == 1) {   // the earliest starters only, then the draw among them
+            int smin = 0x7fffffff, w = 0;
+            for (int c = 0; c < nc; c++) { int a = cand[c], sa = jfree[a] > mfree[k] ? jfree[a] : mfree[k]; if (sa < smin) smin = sa; }
+            for (int c = 0; c < nc; c++) { int a = cand[c], sa = jfree[a] > mfree[k] ? jfree[a] : mfree[k]; if (sa == smin) cand[w++] = a; }
+            nc = w;
+        }
+        int j = cand[(int)((shop_rng(&rng) >> 33) % (uint64_t)nc)];
+        int o = j * m + next[j];
         int s0 = jfree[j] > mfree[k] ? jfree[j] : mfree[k];
         jfree[j] = mfree[k] = s0 + dur[o];
         seq_out[k * n + fill[k]++] = j;
@@ -180,6 +201,20 @@ void pfa_shop_gt(int n, int m, const int *mach, const int *dur, uint64_t seed, i
 #undef WAIT_DEL
 #undef KEY
     free(next); free(jfree); free(mfree); free(fill); free(ver); free(wait); free(wnext); free(whead); free(wprev); free(heap); free(cand);
+}
+
+// The first schedule: the best of `draws` non-delay starts (their makespans spread about two percent at a million
+// operations, 0.15 s each there; the shipped count is SHOP_STARTS). Returns its makespan.
+int pfa_shop_start(int n, int m, const int *mach, const int *dur, uint64_t seed, int draws, int *seq_out) {
+    uint64_t rng = shop_seed(seed);
+    int *t = malloc(sizeof(int) * n * m), best = 0x7fffffff;
+    for (int d = 0; d < draws; d++) {
+        pfa_shop_gt(n, m, mach, dur, shop_rng(&rng), 1, t);
+        int c = pfa_shop_makespan(n, m, mach, dur, t, NULL, NULL);
+        if (c < best) { best = c; memcpy(seq_out, t, sizeof(int) * n * m); }
+    }
+    free(t);
+    return best;
 }
 
 // The critical path from the sink back along the predecessors attaining each head (the machine predecessor preferred,
@@ -315,7 +350,8 @@ static void shop_apply(Shop *S, ShopTabu *T, const ShopMove *M, long until, long
     }
     s[M->to] = x;
     int lo = M->from < M->to ? M->from : M->to, hi = M->from < M->to ? M->to : M->from;
-    for (int p = M->pb + lo; p <= M->pb + hi; p++) S->pos[S->opof[k * n + S->seq[k * n + p]]] = p;
+    lo = M->pb + lo - 1; hi = M->pb + hi + 1;   // the neighbours just outside the stretch get a new machine neighbour
+    shop_reindex(S, k, lo < 0 ? 0 : lo, hi >= n ? n - 1 : hi);
 }
 
 // The N7 moves of the critical path's blocks, evaluated; returns the count. moves has room for 4 * path length.
@@ -373,11 +409,9 @@ static int shop_eval_set(Shop *S, const int *set, int ns, int stamp) {
     return cm;
 }
 
-// The critical segment inside W: from the W operation with the largest r + p + q, back along head-attaining
-// predecessors and forward along tail-attaining successors while they stay in W. path_out in order; returns its length.
-static int shop_critical_in(const Shop *S, const int *set, int ns, int stamp, int *path_out) {
-    int x = -1, cm = -1;
-    for (int i = 0; i < ns; i++) { int o = set[i], c = S->r[o] + S->dur[o] + S->q[o]; if (c > cm) { cm = c; x = o; } }
+// The critical segment inside W through the operation x (the one with the largest r + p + q in W): back along
+// head-attaining predecessors and forward along tail-attaining successors while they stay in W. path_out in order.
+static int shop_segment_in(const Shop *S, int x, int stamp, int *path_out) {
     int len = 0, y = x;
     while (y >= 0) {   // backwards
         path_out[len++] = y;
@@ -398,62 +432,222 @@ static int shop_critical_in(const Shop *S, const int *set, int ns, int stamp, in
     return len;
 }
 
-// The tabu search in time windows (for large instances): an interval [T0, T1) of width `width` on the current heads
-// is a window; P = operations ending by T0, F = those starting at or after T1, W = the rest. A move among W's arcs
-// changes no head on P and no tail on F, so the makespan after it is max(K, max_W r' + p + q') with r', q' recomputed
-// over W alone and K the longest path that jumps W, a constant of the window: the window's search is exact at
-// O(|W|) per move. Windows are swept from 0 to the makespan in steps of width / 2, each searched for at most
-// `win_iters` iterations and left after `win_idle` without a new window best; a global pass at every window's entry.
-// The tabu list, the best and the kick carry across windows. Stops after `seconds` of CPU time.
-// stats (8): iterations, moves evaluated, windows searched, windows skipped (the path jumps them), sweeps,
-// new bests, mean |W| (sum), the start's makespan.
+// The window search's machinery: a worklist keyed by the stored head or tail (a topological key, durations being
+// positive, so repeats are rare; the empty worklist is consistency with every neighbour and hence exactness), and a
+// segment tree over W's local indices holding r + p + q with the maximum and its operation at the root.
+// The worklist as a bucket queue over the key (a head or a tail, at most the makespan): O(1) push and pop, the next
+// non-empty bucket found in a bitmap word scan; an operation is queued at most once (re-queued after it is popped),
+// a key below the sweep pointer is clamped to it (order only keeps repeats rare, the empty queue is exactness).
+typedef struct { int *bucket, *next; char *in; uint64_t *bits; int cap, ptr, hi, n; } WQueue;
+static void wq_init(WQueue *Q, int cap, int nloc) {
+    Q->cap = cap; Q->bucket = malloc(sizeof(int) * cap); for (int k = 0; k < cap; k++) Q->bucket[k] = -1;
+    Q->bits = calloc((cap + 63) / 64, sizeof(uint64_t)); Q->next = malloc(sizeof(int) * nloc); Q->in = calloc(nloc, 1); Q->ptr = 0; Q->hi = -1; Q->n = 0;
+}
+static void wq_free(WQueue *Q) { free(Q->bucket); free(Q->bits); free(Q->next); free(Q->in); }
+static inline void wq_push(WQueue *Q, int key, int i) {
+    if (Q->in[i]) return;
+    if (key >= Q->cap) key = Q->cap - 1;   // the search can go above the start's makespan; the order only keeps repeats rare
+    if (Q->n == 0) Q->ptr = key; else if (key < Q->ptr) key = Q->ptr;
+    Q->in[i] = 1; Q->next[i] = Q->bucket[key]; Q->bucket[key] = i; Q->bits[key >> 6] |= 1ull << (key & 63);
+    if (key > Q->hi) Q->hi = key;
+    Q->n++;
+}
+static inline int wq_pop(WQueue *Q) {
+    int w = Q->ptr >> 6;
+    uint64_t word = Q->bits[w] & (~0ull << (Q->ptr & 63));
+    while (!word) word = Q->bits[++w];
+    int key = (w << 6) + __builtin_ctzll(word), i = Q->bucket[key];
+    Q->bucket[key] = Q->next[i];
+    if (Q->bucket[key] < 0) Q->bits[w] &= ~(1ull << (key & 63));
+    Q->in[i] = 0; Q->ptr = key; Q->n--;
+    return i;
+}
+typedef struct { int size, *val, *op; } WTree;
+static inline void wt_up(WTree *T, int x) {
+    for (x >>= 1; x >= 1; x >>= 1) { int l = 2 * x, r = l + 1; if (T->val[l] >= T->val[r]) { T->val[x] = T->val[l]; T->op[x] = T->op[l]; } else { T->val[x] = T->val[r]; T->op[x] = T->op[r]; } }
+}
+
+typedef struct {
+    int *set, ns, stamp;   // W, in machine order
+    int *loc;              // a W operation's index in set
+    int *chg, nchg, *cst, cver;   // the local indices changed by the last move
+    // the compact window: W's values and links by local index, so the recompute streams from cache (seat 4's design;
+    // the global arrays at a million operations put every neighbour lookup in another cache line, 90 ns a value)
+    int *lr, *lq, *lp;             // heads, tails, durations
+    int *ljp, *ljs, *lmp, *lms;    // neighbours as local indices, -1 when outside W or absent
+    int *bjp, *bjs, *bmp, *bms;    // the fixed value of a neighbour outside W: a predecessor's end, a successor's tail + p (0 when absent)
+    WQueue q; WTree tree;
+    long pops;             // worklist pops, summed (stats[15])
+} Win;
+
+static inline void win_link_mach(const Shop *S, Win *W, int i, int o) {   // the machine links of local i (operation o) from the global ones
+    int mp = S->mpred[o], ms = S->msucc[o], stamp = W->stamp;
+    W->lmp[i] = mp >= 0 && S->mark[mp] == stamp ? W->loc[mp] : -1; W->bmp[i] = mp >= 0 && S->mark[mp] != stamp ? S->r[mp] + S->dur[mp] : 0;
+    W->lms[i] = ms >= 0 && S->mark[ms] == stamp ? W->loc[ms] : -1; W->bms[i] = ms >= 0 && S->mark[ms] != stamp ? S->q[ms] + S->dur[ms] : 0;
+}
+
+// The window's local arrays from the global state (the job links, the machine links, the values).
+static void win_build(const Shop *S, Win *W) {
+    const int stamp = W->stamp;
+    for (int i = 0; i < W->ns; i++) {
+        int o = W->set[i], jp = shop_jp(S, o), js = shop_js(S, o);
+        W->lr[i] = S->r[o]; W->lq[i] = S->q[o]; W->lp[i] = S->dur[o];
+        W->ljp[i] = jp >= 0 && S->mark[jp] == stamp ? W->loc[jp] : -1; W->bjp[i] = jp >= 0 && S->mark[jp] != stamp ? S->r[jp] + S->dur[jp] : 0;
+        W->ljs[i] = js >= 0 && S->mark[js] == stamp ? W->loc[js] : -1; W->bjs[i] = js >= 0 && S->mark[js] != stamp ? S->q[js] + S->dur[js] : 0;
+        win_link_mach(S, W, i, o);
+    }
+}
+
+static inline int win_head(const Win *W, int i) { int a = W->ljp[i] >= 0 ? W->lr[W->ljp[i]] + W->lp[W->ljp[i]] : W->bjp[i], b = W->lmp[i] >= 0 ? W->lr[W->lmp[i]] + W->lp[W->lmp[i]] : W->bmp[i]; return a > b ? a : b; }
+static inline int win_tail(const Win *W, int i) { int a = W->ljs[i] >= 0 ? W->lq[W->ljs[i]] + W->lp[W->ljs[i]] : W->bjs[i], b = W->lms[i] >= 0 ? W->lq[W->lms[i]] + W->lp[W->lms[i]] : W->bms[i]; return a > b ? a : b; }
+
+// Heads and tails over the whole window by Kahn's passes on the local arrays, written back to the global ones; the
+// tree built from the result. Returns max of r + p + q, or -1 on a cycle.
+static int win_eval(Shop *S, Win *W, int *indeg, int *topo) {
+    const int ns = W->ns;
+    for (int pass = 0; pass < 2; pass++) {
+        int head = 0, tail = 0;
+        for (int i = 0; i < ns; i++) { indeg[i] = pass ? (W->ljs[i] >= 0) + (W->lms[i] >= 0) : (W->ljp[i] >= 0) + (W->lmp[i] >= 0); if (!indeg[i]) topo[tail++] = i; }
+        while (head < tail) {
+            int i = topo[head++];
+            if (!pass) { W->lr[i] = win_head(W, i); if (W->ljs[i] >= 0 && --indeg[W->ljs[i]] == 0) topo[tail++] = W->ljs[i]; if (W->lms[i] >= 0 && --indeg[W->lms[i]] == 0) topo[tail++] = W->lms[i]; }
+            else { W->lq[i] = win_tail(W, i); if (W->ljp[i] >= 0 && --indeg[W->ljp[i]] == 0) topo[tail++] = W->ljp[i]; if (W->lmp[i] >= 0 && --indeg[W->lmp[i]] == 0) topo[tail++] = W->lmp[i]; }
+        }
+        if (tail < ns) return -1;
+    }
+    int size = 1; while (size < ns) size <<= 1;
+    W->tree.size = size;
+    int cm = 0;
+    for (int i = 0; i < ns; i++) { int o = W->set[i]; S->r[o] = W->lr[i]; S->q[o] = W->lq[i]; int c = W->lr[i] + W->lp[i] + W->lq[i]; if (c > cm) cm = c; W->tree.val[size + i] = c; W->tree.op[size + i] = o; }
+    for (int i = ns; i < size; i++) { W->tree.val[size + i] = -1; W->tree.op[size + i] = -1; }
+    for (int x = size - 1; x >= 1; x--) { int l = 2 * x, r = l + 1; if (W->tree.val[l] >= W->tree.val[r]) { W->tree.val[x] = W->tree.val[l]; W->tree.op[x] = W->tree.op[l]; } else { W->tree.val[x] = W->tree.val[r]; W->tree.op[x] = W->tree.op[r]; } }
+    return cm;
+}
+
+// After a move on machine k over the block at positions pb .. pb + len - 1: the machine links of the stretch and its
+// two outer neighbours refreshed, then the heads and tails that change, by the worklist from the block outward on the
+// local arrays, written back to the global heads and tails as they change; the tree's leaves updated.
+static void win_recompute(Shop *S, Win *W, int k, int pb, int len, long *nheads, long *ntails) {
+    const int n = S->n, stamp = W->stamp, *sq = S->seq + k * n, *op = S->opof + k * n;
+    int lo = pb > 0 ? pb - 1 : 0, hi = pb + len < n ? pb + len : n - 1;
+    for (int p = lo; p <= hi; p++) { int o = op[sq[p]]; if (S->mark[o] == stamp) win_link_mach(S, W, W->loc[o], o); }
+    W->nchg = 0; W->cver++;
+    for (int p = pb; p <= hi; p++) { int o = op[sq[p]]; if (S->mark[o] == stamp) { int i = W->loc[o]; wq_push(&W->q, W->lr[i], i); } }
+    while (W->q.n) {   // a successor is queued only when its head will change (its new value read at once, two loads)
+        int i = wq_pop(&W->q), h = win_head(W, i);
+        W->pops++;
+        if (h == W->lr[i]) continue;
+        W->lr[i] = h; S->r[W->set[i]] = h; (*nheads)++;
+        if (W->cst[i] != W->cver) { W->cst[i] = W->cver; W->chg[W->nchg++] = i; }
+        int a = W->ljs[i], b = W->lms[i];
+        if (a >= 0 && win_head(W, a) != W->lr[a]) wq_push(&W->q, W->lr[a], a);
+        if (b >= 0 && win_head(W, b) != W->lr[b]) wq_push(&W->q, W->lr[b], b);
+    }
+    for (int p = lo; p < pb + len; p++) { int o = op[sq[p]]; if (S->mark[o] == stamp) { int i = W->loc[o]; wq_push(&W->q, W->lq[i], i); } }
+    while (W->q.n) {
+        int i = wq_pop(&W->q), h = win_tail(W, i);
+        W->pops++;
+        if (h == W->lq[i]) continue;
+        W->lq[i] = h; S->q[W->set[i]] = h; (*ntails)++;
+        if (W->cst[i] != W->cver) { W->cst[i] = W->cver; W->chg[W->nchg++] = i; }
+        int a = W->ljp[i], b = W->lmp[i];
+        if (a >= 0 && win_tail(W, a) != W->lq[a]) wq_push(&W->q, W->lq[a], a);
+        if (b >= 0 && win_tail(W, b) != W->lq[b]) wq_push(&W->q, W->lq[b], b);
+    }
+    for (int c = 0; c < W->nchg; c++) { int i = W->chg[c], x = W->tree.size + i; W->tree.val[x] = W->lr[i] + W->lp[i] + W->lq[i]; wt_up(&W->tree, x); }
+}
+
+static int shop_check = 0;   // 1: the change-driven recompute asserted against the full window pass on every step (slow; the tests)
+void pfa_shop_check(int on) { shop_check = on; }
+
+static inline long shop_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000000L + t.tv_nsec; }
+
+// The tabu search in time windows (for large instances). An interval [T0, T1) of width `width` on the current heads is
+// a window; P = operations ending by T0, F = those starting at or after T1, W = the rest. P is predecessor-closed and F
+// successor-closed, so a move among W's arcs changes no head on P and no tail on F, and the makespan after it is
+// max(K, max_W r' + p + q') with r', q' recomputed over W alone and K the longest path that jumps W (an arc from P to
+// F, at most one per machine and per job, or a path ending in P), a constant of the window: the window's search is
+// exact. After a move only the heads and tails that change are recomputed (`win_recompute`), the window's maximum
+// kept in a tree. The windows are swept backward in time, from the makespan to 0 in steps of width / 2: sweeping
+// backward the new P is a subset of the old (heads exact, never written), the new F is the old F plus the old W's
+// operations with exact head at or above the new T1 (successor-closed; F's tails are exact since moves in W change
+// tails upstream only), and membership by the stored heads is exact since both predicates are monotone along every
+// machine and job, so W is a position range per machine found by two binary searches; only the tails of the new W's
+// old-P members are stale, which one pass over W at entry fixes. (The forward sweep cannot drop its global pass: an
+// uphill move raises a head above the next T1 while its old-F successor's stale head stays below, and F is not
+// successor-closed at the seam.) The full pass runs once per sweep and asserts the tracked makespan (stats[3] counts
+// mismatches; zero or the run is wrong). Each window is searched for at most `win_iters` iterations and left after
+// `win_idle` without a window best; the tabu list, the best and the kick carry across windows. Stops after `seconds`
+// of CPU time or `iters` iterations. seq_io: the trajectory (in and out); best_seq: the best; t0_io: the sweep
+// position carried across calls. stats (16): iterations, moves evaluated, windows searched, mismatches at the sweep
+// assertion, sweeps, new bests, |W| summed, the start's makespan, heads changed, tails changed, entry ns, recompute ns,
+// windows left by the iteration cap, segment+moves+selection ns, windows skipped (the path jumps them), worklist pops.
 int pfa_shop_tabu_win(int n, int m, const int *mach, const int *dur, int *seq_io, double seconds, long iters, uint64_t seed,
                       int *best_seq, double width, long win_iters, long win_idle, double *t0_io, long *stats) {
     Shop *S = shop_new(n, m, mach, dur, seq_io);
     if (!shop_eval(S)) { shop_free(S); return -1; }
     const int N = S->N, L = 10 + n / m;
     ShopTabu *T = calloc(1, sizeof(ShopTabu)); T->max_tenure = L + L / 2 + 1;
-    int *path = malloc(sizeof(int) * N), *work = malloc(sizeof(int) * N), *set = malloc(sizeof(int) * N);
+    int *path = malloc(sizeof(int) * N), *work = malloc(sizeof(int) * N);
     ShopMove *moves = malloc(sizeof(ShopMove) * 4 * N);
+    Win W = {0};
+    W.set = malloc(sizeof(int) * N); W.loc = malloc(sizeof(int) * N); W.cst = calloc(N, sizeof(int)); W.chg = malloc(sizeof(int) * N);
+    int *lbuf = malloc(sizeof(int) * 11 * (size_t)N);   // the compact window's eleven arrays
+    W.lr = lbuf; W.lq = lbuf + N; W.lp = lbuf + 2 * (size_t)N; W.ljp = lbuf + 3 * (size_t)N; W.ljs = lbuf + 4 * (size_t)N; W.lmp = lbuf + 5 * (size_t)N; W.lms = lbuf + 6 * (size_t)N; W.bjp = lbuf + 7 * (size_t)N; W.bjs = lbuf + 8 * (size_t)N; W.bmp = lbuf + 9 * (size_t)N; W.bms = lbuf + 10 * (size_t)N;
+    wq_init(&W.q, S->cmax + 1, N);   // keys are heads and tails, below the start's makespan
+    { int size = 1; while (size < N) size <<= 1; W.tree.val = malloc(sizeof(int) * 2 * size); W.tree.op = malloc(sizeof(int) * 2 * size); }
     int best = S->cmax;
-    long st[8] = {0}; st[7] = S->cmax;
-    S->rng = seed | 1;
+    long st[16] = {0}; st[7] = S->cmax;
+    S->rng = shop_seed(seed);
     clock_t t_end = seconds > 0 ? clock() + (clock_t)(seconds * CLOCKS_PER_SEC) : 0;   // a clock limit, an iteration limit, or both
 #define WIN_OUT ((t_end && clock() >= t_end) || it >= iters)
     long since = 0, it = 0;
     typedef struct { int k, from, to; } Undo;   // a move as applied, absolute positions on the machine
     long ulen = 0, ucap = 1 << 16; Undo *ulog = malloc(sizeof(Undo) * ucap);
     shop_all_ends = 1;
-    double T0 = t0_io ? *t0_io : 0.0;   // the sweep continues where the previous call left it
-    for (;;) {   // sweeps
-        for (; T0 < S->cmax && !WIN_OUT; T0 += width / 2) {
-            if (!shop_eval(S)) break;   // the global pass: F's heads and P's tails made exact again
-            double T1 = T0 + width;
-            int stamp = ++S->stamp, ns = 0;
-            long K = 0;
-            for (int o = 0; o < N; o++) {
-                int r = S->r[o], e = r + S->dur[o];
-                if (e > T0 && r < T1) { S->mark[o] = stamp; set[ns++] = o; }
+    double top = S->cmax - width > 0 ? S->cmax - width : 0;
+    double T0 = (t0_io && *t0_io > 0 && *t0_io < S->cmax) ? *t0_io : top;   // the sweep continues where the previous call left it
+    for (;;) {
+        if (WIN_OUT) break;
+        long t_entry = shop_ns();
+        const double T1 = T0 + width;
+        const int stamp = ++S->stamp;
+        int ns = 0;
+        long K = 0;
+        for (int k = 0; k < m; k++) {   // W's position range on machine k: ends > T0 from lo, heads >= T1 from hi (both monotone)
+            const int *sq = S->seq + k * n, *op = S->opof + k * n;
+            int lo = 0, hi = n;
+            for (int a = 0, b = n; a < b;) { int c = (a + b) / 2; if (shop_end(S, op[sq[c]]) > T0) b = c; else a = c + 1; lo = a; }
+            for (int a = lo, b = n; a < b;) { int c = (a + b) / 2; if (S->r[op[sq[c]]] >= T1) b = c; else a = c + 1; hi = a; }
+            for (int p = lo; p < hi; p++) { int o = op[sq[p]]; S->mark[o] = stamp; W.loc[o] = ns; W.set[ns++] = o; }
+            if (lo > 0) {   // the last P operation: its end (a path ending in P) and, with no W operation on the machine, its arc into F
+                int a = op[sq[lo - 1]]; long e = shop_end(S, a);
+                if (e > K) K = e;
+                if (lo == hi && lo < n) { int b = op[sq[lo]]; long c = e + S->dur[b] + S->q[b]; if (c > K) K = c; }
             }
-            for (int o = 0; o < N; o++) {   // K over F: the head from P predecessors only
-                if (S->r[o] < T1 || S->mark[o] == stamp) continue;
-                int jp = shop_jp(S, o), mp = shop_mp(S, o);
-                long rho = 0;
-                if (jp >= 0 && S->mark[jp] != stamp && S->r[jp] + S->dur[jp] <= T0 && shop_end(S, jp) > rho) rho = shop_end(S, jp);
-                if (mp >= 0 && S->mark[mp] != stamp && S->r[mp] + S->dur[mp] <= T0 && shop_end(S, mp) > rho) rho = shop_end(S, mp);
-                long c = rho + S->dur[o] + S->q[o];
-                if (c > K) K = c;
+        }
+        for (int j = 0; j < n; j++) {   // the one job arc from P to F, if any
+            const int o0 = j * m;
+            int i0 = 0;
+            for (int a = 0, b = m; a < b;) { int c = (a + b) / 2; if (shop_end(S, o0 + c) > T0) b = c; else a = c + 1; i0 = a; }
+            if (i0 > 0) {
+                long e = shop_end(S, o0 + i0 - 1);
+                if (e > K) K = e;
+                if (i0 < m && S->r[o0 + i0] >= T1) { int b = o0 + i0; long c = e + S->dur[b] + S->q[b]; if (c > K) K = c; }
             }
-            if (ns == 0) continue;
-            st[6] += ns;
-            int cmW = 0;
-            for (int i = 0; i < ns; i++) { int o = set[i], c = S->r[o] + S->dur[o] + S->q[o]; if (c > cmW) cmW = c; }
-            if (cmW <= K) { st[3]++; continue; }   // the critical path jumps this window
-            st[2]++;
-            int wbest = cmW; long widle = 0;
-            for (long wi = 0; wi < win_iters && widle < win_idle; wi++, it++) {
+        }
+        W.ns = ns; W.stamp = stamp;
+        int cmW = 0;
+        if (ns > 0) { win_build(S, &W); cmW = win_eval(S, &W, S->indeg, S->topo); }
+        if (cmW < 0) { shop_all_ends = 0; shop_free(S); free(T); free(path); free(work); free(moves); free(W.set); free(W.loc); free(W.cst); free(W.chg); free(lbuf); wq_free(&W.q); free(W.tree.val); free(W.tree.op); free(ulog); return -2; }
+        st[10] += shop_ns() - t_entry;
+        if (ns > 0 && cmW > K) {
+            st[2]++; st[6] += ns;
+            int wbest = cmW; long widle = 0, wi = 0;
+            for (; wi < win_iters && widle < win_idle; wi++, it++) {
                 if (it >= iters || ((it & 255) == 0 && t_end && clock() >= t_end)) break;
-                int plen = shop_critical_in(S, set, ns, stamp, path);
+                long t_seg = shop_ns();
+                int plen = shop_segment_in(S, W.tree.op[1], stamp, path);
                 int nm = shop_moves(S, path, plen, moves, work);
                 st[1] += nm;
                 if (nm == 0) break;
@@ -472,17 +666,34 @@ int pfa_shop_tabu_win(int n, int m, const int *mach, const int *dur, int *seq_io
                 shop_apply(S, T, M, it + tenure, it);
                 if (ulen == ucap) { ucap *= 2; ulog = realloc(ulog, sizeof(Undo) * ucap); }
                 ulog[ulen++] = (Undo){M->k, M->pb + M->from, M->pb + M->to};
-                int cmW2 = shop_eval_set(S, set, ns, stamp);
-                if (cmW2 < 0) { shop_all_ends = 0; shop_free(S); free(T); free(path); free(work); free(set); free(moves); free(ulog); return -2; }
+                long t_rec = shop_ns();
+                st[13] += t_rec - t_seg;
+                win_recompute(S, &W, M->k, M->pb, M->len, &st[8], &st[9]);
+                st[11] += shop_ns() - t_rec;
+                int cmW2 = W.tree.val[1];
+                if (shop_check) {   // the full window pass over the global arrays must agree on every head and tail
+                    int c2 = shop_eval_set(S, W.set, ns, stamp);
+                    if (c2 != cmW2) st[3]++;
+                    for (int i = 0; i < ns; i++) { int o = W.set[i]; if (W.lr[i] != S->r[o] || W.lq[i] != S->q[o] || W.tree.val[W.tree.size + i] != S->r[o] + S->dur[o] + S->q[o]) { st[3]++; break; } }
+                    cmW2 = win_eval(S, &W, S->indeg, S->topo);
+                }
                 long cm = cmW2 > K ? cmW2 : K;
                 S->cmax = (int)cm;
                 if (cm < best) { best = (int)cm; ulen = 0; since = 0; st[5]++; } else since++;   // the log restarts at a new best
                 if (cmW2 < wbest) { wbest = cmW2; widle = 0; } else widle++;
                 st[0]++;
             }
-        }
-        if (T0 >= S->cmax) { T0 = 0; st[4]++; }
-        if (WIN_OUT) break;
+            if (wi >= win_iters) st[12]++;
+        } else if (ns > 0) st[14]++;
+        if (T0 <= 0) {   // the sweep wraps: everything exact again, the tracked makespan asserted
+            int tracked = S->cmax;
+            if (!shop_eval(S)) break;
+            if (S->cmax != tracked) st[3]++;
+            if (S->cmax < best) best = S->cmax;
+            st[4]++;
+            top = S->cmax - width > 0 ? S->cmax - width : 0;
+            T0 = top;
+        } else { T0 -= width / 2; if (T0 < 0) T0 = 0; }
     }
     if (t0_io) *t0_io = T0;
 #undef WIN_OUT
@@ -494,8 +705,9 @@ int pfa_shop_tabu_win(int n, int m, const int *mach, const int *dur, int *seq_io
         if (to > from) { memmove(sq + from + 1, sq + from, sizeof(int) * (to - from)); sq[from] = x; }
         else { memmove(sq + to, sq + to + 1, sizeof(int) * (from - to)); sq[from] = x; }
     }
+    st[15] = W.pops;
     if (stats) memcpy(stats, st, sizeof(st));
-    shop_free(S); free(T); free(path); free(work); free(set); free(moves); free(ulog);
+    shop_free(S); free(T); free(path); free(work); free(moves); free(W.set); free(W.loc); free(W.cst); free(W.chg); free(lbuf); wq_free(&W.q); free(W.tree.val); free(W.tree.op); free(ulog);
     return best;
 }
 
@@ -508,7 +720,7 @@ void pfa_shop_estimate_check(int n, int m, const int *mach, const int *dur, cons
     int *path = malloc(sizeof(int) * S->N), *work = malloc(sizeof(int) * S->N);
     ShopMove *moves = malloc(sizeof(ShopMove) * 4 * S->N);
     long o[4] = {0};
-    S->rng = seed | 1;
+    S->rng = shop_seed(seed);
     for (long it = 0; it < steps; it++) {
         int plen = shop_critical(S, path), nm = shop_moves(S, path, plen, moves, work);
         if (!nm) break;
@@ -551,7 +763,7 @@ int pfa_shop_tabu(int n, int m, const int *mach, const int *dur, int *seq_io, lo
     int best = S->cmax;
     memcpy(best_seq, S->seq, sizeof(int) * S->N);
     long since = 0, st[8] = {0};
-    S->rng = seed | 1;
+    S->rng = shop_seed(seed);
     for (long it = 0; it < iters && since < cutoff; it++) {
         if (t_end && (it & 1023) == 0 && clock() >= t_end) break;   // the wall-clock limit, checked every 1024 iterations
         int plen = shop_critical(S, path);

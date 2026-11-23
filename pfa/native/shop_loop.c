@@ -49,7 +49,7 @@ static int shop_relink_step(Shop *S, const int *B, int *posB, uint64_t *rng) {
     }
     if (seen == 0) return 0;
     int *a = S->seq + cand_k * n, t = a[cand_p]; a[cand_p] = a[cand_p + 1]; a[cand_p + 1] = t;
-    S->pos[S->opof[cand_k * n + a[cand_p]]] = cand_p; S->pos[S->opof[cand_k * n + a[cand_p + 1]]] = cand_p + 1;
+    shop_reindex(S, cand_k, cand_p > 0 ? cand_p - 1 : 0, cand_p + 2 < n ? cand_p + 2 : n - 1);
     if (!shop_eval(S)) return -1;   // the test is sufficient: cannot happen
     return 1;
 }
@@ -137,12 +137,13 @@ int pfa_shop_loop(int n, int m, const int *mach, const int *dur, long restarts, 
     const int N = n * m;
     int *t = malloc(sizeof(int) * N), *best = malloc(sizeof(int) * N), *work = malloc(sizeof(int) * (N > 3 * n ? N : 3 * n));
     long st[4] = {0}, tst[8];
-    uint64_t rng = seed | 1;
+    uint64_t rng = shop_seed(seed);
     for (long r = 0; r < restarts; r++) {
         int filled = 0;
         for (int i = 0; i < P; i++) filled += pcost[i] < 0x7fffffff;
         if (filled < (shop_mode == 1 ? P : 2)) {   // TS/PR fills its population first
-            pfa_shop_gt(n, m, mach, dur, shop_rng(&rng), t);
+            if (filled == 0) pfa_shop_start(n, m, mach, dur, shop_rng(&rng), SHOP_STARTS, t);   // the first member the best of the non-delay draws, the rest random for the pool's spread
+            else pfa_shop_gt(n, m, mach, dur, shop_rng(&rng), 0, t);
         } else if (shop_mode == 1 || shop_mode == 3) {
             int ia, ib;
             if (shop_mode == 1) { ia = (int)((shop_rng(&rng) >> 33) % (uint64_t)filled); do { ib = (int)((shop_rng(&rng) >> 33) % (uint64_t)filled); } while (ib == ia); }

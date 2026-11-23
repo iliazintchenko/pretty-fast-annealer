@@ -656,9 +656,10 @@ lessons stop: a longest path, not a sum.
 - **The state.** The order of the jobs on every machine, with every operation's head (the longest path from the
   start to it) and tail (from its end to the finish): the makespan is the longest head plus duration plus tail, and
   an operation is critical when its three reach it. Orders drawn at random are cyclic, so a start is an active
-  schedule built by Giffler and Thompson's rule with a random choice among the conflicting operations. After a move
-  the heads and tails are recomputed by one topological pass, or, past tens of thousands of operations, only over the
-  operations the move can reach.
+  schedule built by Giffler and Thompson's rule: the first schedule takes, among the conflicting operations, the one
+  that can start earliest (the non-delay schedule, which on the largest instances is already better than a minute of
+  search from a random choice) and is the best of a few such draws, the pool's later members a random choice for
+  their spread. After a move the heads and tails are recomputed by one topological pass.
 - **The move.** The kernel (`shop.c`) is Zhang et al.'s tabu search on their N7 neighbourhood at zero temperature.
   The critical path is cut into blocks, maximal runs on one machine; every inner operation of a block is moved to the
   block's front or to its back, and the block's first and last operations are moved inside it; a change at the front
@@ -689,9 +690,18 @@ lessons stop: a longest path, not a sum.
   search then runs in time windows: for an interval on the current heads, the operations ending before it and those
   starting after it are frozen, and a move among the rest changes no head before and no tail after, so the makespan
   after the move is exact from a recompute over the window alone and the longest path that jumps it, a constant of
-  the window. The windows are swept along the schedule, each searched briefly with the tabu list, the best and the
-  kick carried across them: one trajectory with a moving neighbourhood, a restart being a fixed number of its
-  iterations, and the same kernel inside. The pool and the relink are not run at that size.
+  the window. Inside the window only what a move changes is recomputed: a worklist from the moved block outward,
+  ordered by the stored heads (and, backward, the tails) in a bucket queue, each operation recomputed from its two
+  neighbours and a successor queued only when its own value will change, the window's values and links held in dense
+  local arrays, the window's maximum kept in a tree; a move changes a few percent of a window on a million operations,
+  so this is the difference between a thousand moves a second and twenty-five thousand. The
+  windows are swept backward in time, from the makespan toward zero: sweeping that way the frozen sets stay closed
+  under predecessors and successors without recomputing anything outside the window, which a forward sweep cannot
+  guarantee once a move has pushed a head past the next window's edge, and the window's constant comes from the few
+  arcs that jump it, found by binary search. One full pass per sweep asserts the tracked makespan. Each window is
+  searched briefly with the tabu list, the best and the kick carried across them: one trajectory with a moving
+  neighbourhood, a restart being a fixed number of its iterations, and the same kernel inside. The pool and the relink
+  are not run at that size.
 
 The kernel is Zhang et al.'s, the loop is Peng, Lü and Cheng's, the acyclicity condition Balas and Vazacopoulos's,
 the start Giffler and Thompson's. What is PFA's on shops is the budget as one number and the finding that the
