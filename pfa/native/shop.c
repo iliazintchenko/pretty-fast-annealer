@@ -26,7 +26,8 @@ typedef struct {
     uint64_t rng;
 } Shop;
 
-static int shop_incr_threshold = 50000;   // operations from which a move's recompute is incremental
+static int shop_incr_threshold = 0x7fffffff;   // operations from which a move's recompute is incremental: off by default, since a critical move's
+                                                // reach measured 94-97% of the operations at 10,000-100,000 of them and the full pass is twice as fast
 static int shop_tabu_mode = 0;             // 0: the arc tabu (reversed arcs, tenure L..1.5L); 1: the hash tabu (visited solutions)
 static long shop_kick = 1000;              // a random move after this many iterations without a new best (Xie et al.'s rule has 200; 1000 measured better; 0: never)
 void pfa_shop_knob(int incr_threshold) { shop_incr_threshold = incr_threshold; }
