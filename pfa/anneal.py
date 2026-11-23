@@ -162,6 +162,9 @@ _lib.pfa_route_loop.argtypes = [ctypes.c_int, ctypes.c_int, _f64, _f64, ctypes.c
                                 ctypes.c_int, ctypes.c_uint64, ctypes.c_double, ctypes.c_int, ctypes.c_int, _i32, _f64, _i32, ctypes.c_void_p]
 _lib.pfa_shop_loop.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_long, ctypes.c_long, ctypes.c_uint64, ctypes.c_int, _i32, _i32, _i64, _i64]
 _lib.pfa_shop_loop.restype = ctypes.c_int
+_lib.pfa_shop_gt.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_uint64, _i32]
+_lib.pfa_shop_tabu_win.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, _i32, ctypes.c_double, ctypes.c_long, ctypes.c_uint64, _i32, ctypes.c_double, ctypes.c_long, ctypes.c_long, _f64, _i64]
+_lib.pfa_shop_tabu_win.restype = ctypes.c_int
 _lib.pfa_route_loop.restype = ctypes.c_int
 _lib.pfa_from_one_hot.argtypes = [
     _f64_2d,  # one-hot couplings over all slots
@@ -1334,6 +1337,8 @@ class _Routes:
 
 SHOP_POOL = 30          # the loop's pool of schedules
 SHOP_CUTOFF = 12500     # the long tabu search's cutoff, iterations without a new best; the short one a 25th of it
+SHOP_WINDOWS = 5000     # operations from which the search runs in time windows (when machines are at least half the jobs), one trajectory, a restart being SHOP_CUTOFF iterations
+SHOP_WIDTH = 25.0       # the window's width in mean durations, times max(1, machines / jobs) (measured: 25 on 100x100, 30 on 1000x1000, 200 on 100x1000)
 
 
 def shop(machines: np.ndarray, durations: np.ndarray, num_steps: int = 100, seed: int = 42) -> tuple[int, list[list[int]]]:
@@ -1372,6 +1377,19 @@ class _Shop:
         self.dm = np.zeros(self.P * self.P, dtype=np.int64)
 
     def loop(self, restarts, rng):
+        if self.n * self.m >= SHOP_WINDOWS and 2 * self.m >= self.n:   # the large regime: one trajectory in time windows, continued across calls (with jobs far outnumbering machines the plain loop closes the instance faster)
+            N = self.n * self.m
+            if self.cost[0] == 0x7fffffff:
+                _lib.pfa_shop_gt(self.n, self.m, self.mach, self.dur, int(rng.integers(1, 2**63)), self.pool[:N])
+                self.state, self.t0 = self.pool[:N].copy(), np.zeros(1)
+            best = np.empty(N, dtype=np.int32)
+            st = np.zeros(8, dtype=np.int64)
+            c = _lib.pfa_shop_tabu_win(self.n, self.m, self.mach, self.dur, self.state, 0.0, restarts * SHOP_CUTOFF, int(rng.integers(1, 2**63)),
+                                       best, SHOP_WIDTH * max(1.0, self.m / self.n) * float(self.dur.mean()), 300, 50, self.t0, st)
+            if c < self.cost[0]:
+                self.pool[:N] = best
+                self.cost[0] = c
+            return int(self.cost[0])
         st = np.zeros(4, dtype=np.int64)
         return _lib.pfa_shop_loop(self.n, self.m, self.mach, self.dur, restarts, SHOP_CUTOFF, int(rng.integers(1, 2**63)),
                                   self.P, self.pool, self.cost, self.dm, st)

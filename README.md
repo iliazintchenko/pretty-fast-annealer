@@ -684,6 +684,14 @@ lessons stop: a longest path, not a sum.
   solutions, worse on its own. The fold of two schedules was not built: the relink is the merge here, the state's
   structure is a set of permutations with no degree constraint, and the alternating cycles of tours and routes have
   no analogue.
+- **The windows.** Past a few thousand operations a critical move reaches nearly the whole schedule, so the recompute
+  after every move is a pass over everything and a minute buys a few thousand moves on a million operations. The
+  search then runs in time windows: for an interval on the current heads, the operations ending before it and those
+  starting after it are frozen, and a move among the rest changes no head before and no tail after, so the makespan
+  after the move is exact from a recompute over the window alone and the longest path that jumps it, a constant of
+  the window. The windows are swept along the schedule, each searched briefly with the tabu list, the best and the
+  kick carried across them: one trajectory with a moving neighbourhood, a restart being a fixed number of its
+  iterations, and the same kernel inside. The pool and the relink are not run at that size.
 
 The kernel is Zhang et al.'s, the loop is Peng, Lü and Cheng's, the acyclicity condition Balas and Vazacopoulos's,
 the start Giffler and Thompson's. What is PFA's on shops is the budget as one number and the finding that the
