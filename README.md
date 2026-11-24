@@ -244,9 +244,10 @@ class are the loop, a kernel run cold, restarts that keep what the best state ha
 one budget number. The kernel is whatever move the class demands, and is usually the move the class's own best
 solver already uses: the Boltzmann step over spins, Taillard's exchange update on quadratic assignment, Lin and
 Kernighan's chain on tours, the route moves of the hybrid genetic search on routes, the critical-block tabu search on
-shops. The reference is therefore different for every class, and it is the state of the art of that class: optimised
-simulated annealing on spin glasses, robust tabu search and the memetic algorithms on quadratic assignment, LKH on
-tours, HGS-CVRP on routes, the tabu searches and the constraint-programming solvers on shops. The sections below say
+shops, TabuCol on colourings. The reference is therefore different for every class, and it is the state of the art of
+that class: optimised simulated annealing on spin glasses, robust tabu search and the memetic algorithms on quadratic
+assignment, LKH on tours, HGS-CVRP on routes, the tabu searches and the constraint-programming solvers on shops, the
+memetic algorithm HEAD on colourings. The sections below say
 what is mapped how and what is whose; the measurements live with the problem sets.
 
 ### Spin glasses: the step against Metropolis
@@ -707,13 +708,74 @@ The kernel is Zhang et al.'s, the loop is Peng, Lü and Cheng's, the acyclicity 
 the start Giffler and Thompson's. What is PFA's on shops is the budget as one number and the finding that the
 diversity rules that carried routes do not carry shops.
 
+### Colourings
+
+`pfa.colour()` colours a graph with k colours: one colour per vertex, the number of edges whose two ends share a
+colour minimised, zero being a legal colouring; the chromatic number is found by lowering k while a legal colouring
+is still found within the budget. The state of the art is the memetic line, Galinier and Hao's hybrid evolutionary
+algorithm, Lü and Hao's MACOL and Moalic and Gondran's HEAD, a tabu search inside a crossover of colourings; the
+records on the random graphs are Titiloye and Crispin's quantum annealing, QA-col, on twelve cores for hours, and on
+the largest graphs Wu and Hao's independent-set extraction, which peels colour classes off before the memetic search
+runs for days. The objective is a sum of zeros and ones, and almost every move changes it by a small integer or not at
+all.
+
+- **The state.** A colour per vertex and, for every vertex, the number of its neighbours in each colour, so a move's
+  change in conflicts is one subtraction and its update one pass over the moved vertex's neighbours. The vertices in
+  conflict are kept as a list with positions, since the move is drawn among them alone. Each vertex's best colours
+  are cached, and the cache is kept exact only for the vertices in conflict, the ones the scan reads, and marked
+  stale for the rest, with one rescan when a vertex enters the conflicting set: near a legal colouring almost every
+  neighbour of a moved vertex is outside the set, and maintaining their true minima was half the iteration. The
+  reference pins such vertices at zero; the counting of rescans and list edits against its update found the
+  difference.
+- **The move.** The kernel (`colour.c`) is TabuCol, Hertz and de Werra's tabu search in Galinier and Hao's form: the
+  best move over the conflicting vertices, ties uniform, the colour left made tabu for six tenths of the conflicting
+  count plus a small random draw of iterations, a move that beats the call's best taken regardless, and the
+  state returned the most recent one at the call's best, not the first, which sits too close to the colouring it came
+  from. Zero temperature holds for the fourth class, measured on identical starts: a Boltzmann draw over the
+  conflicting vertices' moves lost on successes per iteration at every temperature and cost several times more per
+  iteration. The reason is the one the shops gave: the deltas are small integers, most moves tie at zero, and a draw
+  at any finite temperature is a uniform draw over the plateau plus uphill moves that cost more than they return. The
+  directed element on such a landscape is the memory, and the kernel keeps one.
+- **The fold.** Galinier and Hao's partition crossover, GPX: the largest remaining colour class is taken from the two
+  parents in turn, the vertices left over coloured at random. Measured, what GPX does is displace: its child lands as
+  far from both parents as they are from each other, with the classes they share kept, and the kernel pays the
+  displacement back to the parents' level within one call. A fold that merges more, the classes matched and the
+  agreeing vertices fixed for part of the call, beat GPX per child, but the kernel simply continued from one parent
+  did the same, so the merge itself carries nothing; a random perturbation at the parents' distance was far worse. It
+  is the structure kept that matters, not the merge, which is the restart of the first part of this document in the
+  colouring's own vocabulary: a partial melt of the best state, with the structure two good states share kept.
+- **The loop.** HEAD's duet: two parents, each generation two children by GPX in the two parent orders, each child
+  searched by the kernel for the restart's length and replacing its parent; two elite colourings alternating by
+  cycle, the elite of the previous cycle re-injected every ten generations or when the parents are nearly identical
+  under a greedy matching of their classes. The budget is kernel iterations, the one hardware-free count the
+  literature reports, and the loop never stops before it or a legal colouring: at convergence the elite swap comes
+  first, and when the parents and both elites agree one parent is replaced by a random colouring and searched. A
+  larger pool was not built: the two parents already sit most of the graph apart, and the reference's own evidence
+  argues intensification.
+- **The restart's length.** The one number the reference tunes per instance, over two orders of magnitude between
+  the random and the structured graphs, with an optimum a few times wide a side. PFA reads it from the graph and the
+  run: the length starts at an eighth of the edges, which is the reference's tuning on the random graphs written
+  without the instance, and doubles when the median position of the call's first best over the last hundred displaced
+  calls, children that started above their parents' level, lies past four fifths of the call, the children still
+  descending when the calls end; it never shortens, because too long a search costs generations, which nothing
+  inside a run signals, while too short a one shows in the calls themselves. Rules that also shortened were measured
+  and failed: the child's time to return to its parents' level is censored by the length that bounds it, in both
+  directions; the share of children that return and a two-sided controller on the first best's position move with the
+  stage of the run and find a different length on each graph; and lengthening when the parents converge never fires on
+  the structured graphs, whose parents never become nearly identical. On the random graphs the length never moves
+  from its start; on the structured ones it doubles a few times early and then holds.
+
+The kernel is Hertz and de Werra's in Galinier and Hao's form, the fold is Galinier and Hao's, the loop is Moalic and
+Gondran's. What is PFA's on colourings is the cache kept only where the scan reads, the restart's length read from the
+graph and corrected from the run, and the budget as one number.
+
 ## Usage
 
 `make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the six kernels: `spin.c`,
 `categorical.c` and `swap.c` for couplings as an array, and `sparse_spin.c`, `sparse_categorical.c` and
 `sparse_swap.c`, which draw from the tree of sums of `sums.c`; `eliminate.c` and `fold.c`; and for tours `tour.c`,
-`tour_chain.c`, `alpha.c`, `tour_fold.c` and `tour_ipt.c`; for routes `route.c` and `route_fold.c`; and for shops
-`shop.c` and `shop_loop.c`. The three
+`tour_chain.c`, `alpha.c`, `tour_fold.c` and `tour_ipt.c`; for routes `route.c` and `route_fold.c`; for shops
+`shop.c` and `shop_loop.c`; and for colourings `colour.c` and `colour_loop.c`. The three
 array kernels use the one SIMD path that matches the machine; the rest is the same code on every path:
 
 | path | files | used on |
@@ -761,8 +823,13 @@ number of routes free. `num_steps` is the budget, the number of restarts; `round
 two n × m arrays, row j the operations of job j in order, `machines[j, i]` the machine (each once per job) and
 `durations[j, i]` its processing time. `num_steps` is the budget, the number of restarts (see Shops).
 
-`examples/spins.py` solves a small problem given over 0/1 variables, `examples/colouring.py` colours a graph with
-several values per variable, `examples/qap.py` solves a quadratic assignment and `examples/partition.py` cuts a graph
+`pfa.colour(edges, k, num_steps, seed)` returns the number of edges whose ends share a colour and the colouring, one
+colour in 0 … k − 1 per vertex, for a graph given as an m × 2 array of edges over vertices 0 … n − 1 (`vertices` sets n
+when the last vertices are isolated). `num_steps` is the budget, the number of kernel iterations in all; the search
+returns as soon as the count is zero (see Colourings).
+
+`examples/spins.py` solves a small problem given over 0/1 variables, `examples/colouring.py` finds the fewest colours
+for a random graph, `examples/qap.py` solves a quadratic assignment and `examples/partition.py` cuts a graph
 in two equal parts, both by exchanges, `examples/tour.py` finds a tour through random points, `examples/route.py`
 routes vehicles from a depot to random customers, `examples/shop.py` schedules a random job shop, and
 `examples/throughput.py` measures steps per second.
