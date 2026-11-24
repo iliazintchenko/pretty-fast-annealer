@@ -20,6 +20,10 @@
 //   shop.c                 the job shop: heads and tails of the disjunctive graph, Giffler and Thompson's start,
 //                          pfa_shop_gt(); the tabu search on the N7 neighbourhood at zero temperature, pfa_shop_tabu()
 //   shop_loop.c            path relinking over a pool of schedules, the loop: pfa_shop_loop()
+//   colour.c               graph colouring: TabuCol over the conflicting vertices at zero temperature with the lazy
+//                          cache of best colours, pfa_colour_tabu(); the partition crossover, pfa_colour_gpx()
+//   colour_loop.c          the duet of two parents and two elites under one budget of kernel iterations, the
+//                          restart's length read from the children's returns: pfa_colour_run()
 //   eliminate.c           categorical variables: pfa_eliminate(), before the anneal
 //   fold.c                 pfa_fold_spin(), pfa_fold_sparse_spin(), pfa_fold_categorical(), pfa_fold_swap(): one
 //                          state takes from another every part that it has lower, between the repetitions
@@ -156,5 +160,7 @@ const char *pfa_simd_path(void) { return SIMD_PATH; }
 #include "route_fold.c"
 #include "shop.c"
 #include "shop_loop.c"
+#include "colour.c"
+#include "colour_loop.c"
 #include "eliminate.c"
 #include "fold.c"

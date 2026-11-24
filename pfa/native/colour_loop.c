@@ -58,6 +58,7 @@ long pfa_colour_head(int V, int k, const int *off, const int *nbr, long iter_tc,
             memcpy(col_dump + (2 * ndump + 1) * V, pop[1], V * sizeof(int));
             ndump++;
         }
+        col_target = fit[0] < fit[1] ? fit[0] : fit[1];   // the parents' level, for the call log
         for (int i = 0; i < 2; i++) {
             pfa_colour_gpx(V, k, pop[0], pop[1], i, col_rng(&rng), tmp);
             cfit[i] = col_tabu_run(V, k, off, nbr, tmp, iter_tc, col_rng(&rng), child[i], &iters);
@@ -88,6 +89,99 @@ long pfa_colour_head(int V, int k, const int *off, const int *nbr, long iter_tc,
     }
     if (stats) { stats[0] = iters; stats[1] = (double)gen; stats[2] = (double)best; stats[3] = col_now() - t0; stats[4] = (double)swaps; stats[5] = (double)best_gen; stats[6] = (double)kicks; stats[7] = (double)ndump; }
     col_dump = NULL;
+    for (int i = 0; i < 4; i++) free(pop[i]);
+    free(child[0]); free(child[1]); free(tmp); free(work);
+    return best;
+}
+
+// PFA's loop: HEAD's duet under one budget of kernel iterations, with the restart's length set from the kernel's
+// own report instead of tuned per instance. The length starts at 16 V, the value HEAD tunes for the random graphs
+// (8,000 at 500 vertices, 40,000 at 1,000), and only lengthens: each call reports the iteration at which it first
+// reached its final best, and when the median of that position over the last twenty displaced calls (children that
+// started above their parents' level) lies past 0.7 of the call, the child was still descending when the call ended
+// and the length grows by a third, at most once per ten calls, up to 1,000 V. At HEAD's tuned lengths that median
+// is 0.48-0.63 on DSJC500.5, DSJC1000.5 and le450_25c alike; the structured graphs, which HEAD tunes 27 times longer
+// per vertex, start far past it. The length never shrinks: too long a search costs generations, which nothing inside
+// a run signals, while too short a one shows in the calls themselves. Rules that also shortened were measured and
+// failed: the median return time to the parents' level is censored by the length in both directions, the return share
+// and a two-sided controller on the first best moved with the stage of the run, and doubling on the parents'
+// convergence never fired on le450_25c, whose parents never become 99% identical. The loop never stops before the
+// budget or a legal colouring: at convergence the elite swap comes first; parents and both elites all within 1%, one
+// parent is replaced by a random colouring and searched. stats: kernel iterations, generations, best conflicts,
+// seconds, elite swaps, generation of the best, kicks, final length, lengthenings, mean length over the calls.
+long pfa_colour_run(int V, int k, const int *off, const int *nbr, long budget, double seconds, uint64_t seed,
+                    int *best_out, double *stats) {
+    double t0 = col_now();
+    uint64_t rng = (seed << 1) | 1;
+    int *pop[4], *child[2], *tmp = malloc(V * sizeof(int)), *work = malloc((size_t)k * k * sizeof(int));
+    long fit[4], cfit[2], best, best_gen = 0;
+    for (int i = 0; i < 4; i++) { pop[i] = malloc(V * sizeof(int)); pfa_colour_random(V, k, col_rng(&rng), pop[i]); fit[i] = pfa_colour_conflicts(V, off, nbr, pop[i]); }
+    for (int i = 0; i < 2; i++) child[i] = malloc(V * sizeof(int));
+    memcpy(best_out, pop[0], V * sizeof(int)); best = fit[0];
+    const long floor_L = 1000, cap_L = 1000L * V;
+    long L = 16L * V, doublings = 0;
+    double ratio[20];                                    // the last twenty displaced calls: the first best's position in the call
+    int nrat = 0, irat = 0, since = 0;
+
+    double iters = 0, Lsum = 0, ncalls = 0;
+    long gen = 0, swaps = 0, kicks = 0;
+    int elite = 0, seuil = (int)(0.99 * V);
+    if (L < floor_L) L = floor_L;
+    if (L > cap_L) L = cap_L;
+    while (best > 0 && iters < (double)budget && (seconds <= 0 || col_now() - t0 < seconds)) {
+        gen++;
+        col_target = fit[0] < fit[1] ? fit[0] : fit[1];
+        for (int i = 0; i < 2; i++) {
+            double st[8];
+            pfa_colour_gpx(V, k, pop[0], pop[1], i, col_rng(&rng), tmp);
+            cfit[i] = pfa_colour_tabu(V, k, off, nbr, tmp, L, col_rng(&rng), child[i], st);
+            iters += st[0]; Lsum += L; ncalls++;
+            if (st[6] > col_target && cfit[i] > 0) {     // a displaced child that did not finish the search: where its first best fell
+                ratio[irat] = st[7] / (double)L; irat = (irat + 1) % 20; if (nrat < 20) nrat++;
+                if (nrat == 20 && ++since >= 10) {
+                    double a[20];
+                    for (int j = 0; j < 20; j++) a[j] = ratio[j];
+                    for (int j = 1; j < 20; j++) { double x = a[j]; int q = j; while (q > 0 && a[q - 1] > x) { a[q] = a[q - 1]; q--; } a[q] = x; }
+                    if (0.5 * (a[9] + a[10]) > 0.7 && L < cap_L) { L = L * 4 / 3 > cap_L ? cap_L : L * 4 / 3; doublings++; }
+                    since = 0;
+                }
+            }
+        }
+        for (int i = 0; i < 2; i++) {
+            if (cfit[i] < best) { best = cfit[i]; best_gen = gen; memcpy(best_out, child[i], V * sizeof(int)); }
+            memcpy(pop[i], child[i], V * sizeof(int)); fit[i] = cfit[i];
+            if (cfit[i] <= fit[2 + elite]) { memcpy(pop[2 + elite], child[i], V * sizeof(int)); fit[2 + elite] = cfit[i]; }
+        }
+        int prox = col_proxi(V, k, pop[0], pop[1], work);
+        if (gen % 10 == 0 || prox >= seuil) {
+            elite ^= 1;
+            int r = col_rnd(&rng, 2);
+            if (col_proxi(V, k, pop[r ^ 1], pop[2 + elite], work) >= seuil) r ^= 1;
+            memcpy(pop[r], pop[2 + elite], V * sizeof(int)); fit[r] = fit[2 + elite];
+            fit[2 + elite] = 1L << 60;
+            prox = col_proxi(V, k, pop[0], pop[1], work);
+            swaps++;
+        }
+        if (prox >= seuil) {                             // still converged after the swap
+            int all = 1;
+            for (int e = 2; e < 4 && all; e++) all = col_proxi(V, k, pop[0], pop[e], work) >= seuil;
+            if (all) {
+                int r = col_rnd(&rng, 2);
+                double st[8];
+                pfa_colour_random(V, k, col_rng(&rng), tmp);
+                col_target = -1;
+                fit[r] = pfa_colour_tabu(V, k, off, nbr, tmp, L, col_rng(&rng), pop[r], st);
+                iters += st[0]; Lsum += L; ncalls++;
+                if (fit[r] < best) { best = fit[r]; best_gen = gen; memcpy(best_out, pop[r], V * sizeof(int)); }
+                kicks++;
+            }
+        }
+    }
+    if (stats) {
+        stats[0] = iters; stats[1] = (double)gen; stats[2] = (double)best; stats[3] = col_now() - t0; stats[4] = (double)swaps;
+        stats[5] = (double)best_gen; stats[6] = (double)kicks; stats[7] = (double)L; stats[8] = (double)doublings;
+        stats[9] = ncalls ? Lsum / ncalls : 0;
+    }
     for (int i = 0; i < 4; i++) free(pop[i]);
     free(child[0]); free(child[1]); free(tmp); free(work);
     return best;

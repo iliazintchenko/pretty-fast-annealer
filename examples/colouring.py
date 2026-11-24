@@ -1,41 +1,32 @@
-"""Graph colouring as a categorical problem: each vertex takes one of k colours, and every edge whose ends share a
-colour costs 1. The energy is the number of such edges, 0 for a proper colouring."""
+"""Graph colouring, natively: pfa.colour() takes the edges and a number of colours k and returns a colouring with the
+fewest edges whose ends share a colour, zero when the graph is k-colourable and the search finds it. The chromatic
+number is found by lowering k while a legal colouring is still found within the budget."""
 import os
 import sys
 
 import numpy as np
-import scipy.sparse as sp
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pfa
 
 rng = np.random.default_rng(0)
-V, k, degree = 500, 4, 7   # vertices, colours, mean degree
+V, degree = 250, 125   # a random graph of density one half, like DSJC250.5
 edges = rng.integers(0, V, (V * degree // 2, 2))
 edges = np.unique(np.sort(edges[edges[:, 0] != edges[:, 1]], axis=1), axis=0)
 
-# Value 0 of every variable has no field and no couplings, so the k - 1 other colours have a row each: colour a > 0 of
-# vertex u is row (k - 1) * u + a - 1. Two ends with the same colour a > 0 cost 1 through the coupling between their
-# rows; both at colour 0 cost 1 as well, which the fields and a constant supply: with x_u = 1 when u is not at
-# colour 0, [both at 0] = 1 - x_u - x_v + x_u x_v, and x_u x_v = 1 iff exactly one row of u and one row of v are
-# taken: a coupling of 1 between every row of u and every row of v.
-u, v = edges.T
-rows_u = (k - 1) * u[:, None] + np.arange(k - 1)
-rows_v = (k - 1) * v[:, None] + np.arange(k - 1)
-same = sp.coo_matrix((np.ones(edges.shape[0] * (k - 1)), (rows_u.ravel(), rows_v.ravel())), shape=((k - 1) * V,) * 2)
-every = sp.coo_matrix(
-    (np.ones(edges.shape[0] * (k - 1) ** 2), (np.repeat(rows_u, k - 1, axis=1).ravel(), np.tile(rows_v, k - 1).ravel())),
-    shape=((k - 1) * V,) * 2,
-)
-couplings = (same + every).tocsr()
-couplings = couplings + couplings.T
-fields = -np.bincount(np.concatenate((rows_u.ravel(), rows_v.ravel())), minlength=(k - 1) * V).astype(float)
-constant = edges.shape[0]
-
-colours = pfa.run(couplings, fields, sizes=np.full(V, k), num_steps=500 * V)
-clashes = int(np.sum(colours[u] == colours[v]))
-taken = np.zeros((k - 1) * V)
-taken[(k - 1) * np.flatnonzero(colours) + colours[colours > 0] - 1] = 1.0
-assert pfa.energy(taken, couplings, fields, constant) == clashes
-print(f"{V} vertices, {edges.shape[0]} edges, {k} colours: {clashes} edges with both ends the same colour")
+# a greedy colouring gives the first k; each lower k is tried with the same budget until one fails
+colours = np.full(V, -1)
+for v in range(V):
+    taken = set(colours[edges[edges[:, 0] == v, 1]]) | set(colours[edges[edges[:, 1] == v, 0]])
+    colours[v] = next(c for c in range(V) if c not in taken)
+k = int(colours.max()) + 1
+print(f"{V} vertices, {len(edges)} edges: greedy uses {k} colours")
+while True:
+    conflicts, colouring = pfa.colour(edges, k - 1, num_steps=20_000_000)
+    if conflicts > 0:
+        print(f"{k - 1} colours: {conflicts} edges with both ends the same colour after the budget; {k} colours it is")
+        break
+    k -= 1
+    assert np.all(colouring[edges[:, 0]] != colouring[edges[:, 1]])
+    print(f"{k} colours: a legal colouring")

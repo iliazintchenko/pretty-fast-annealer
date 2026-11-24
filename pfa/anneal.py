@@ -162,6 +162,8 @@ _lib.pfa_route_loop.argtypes = [ctypes.c_int, ctypes.c_int, _f64, _f64, ctypes.c
                                 ctypes.c_int, ctypes.c_uint64, ctypes.c_double, ctypes.c_int, ctypes.c_int, _i32, _f64, _i32, ctypes.c_void_p]
 _lib.pfa_shop_loop.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_long, ctypes.c_long, ctypes.c_uint64, ctypes.c_int, _i32, _i32, _i64, _i64]
 _lib.pfa_shop_loop.restype = ctypes.c_int
+_lib.pfa_colour_run.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_long, ctypes.c_double, ctypes.c_uint64, _i32, _f64]
+_lib.pfa_colour_run.restype = ctypes.c_long
 _lib.pfa_shop_gt.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_uint64, ctypes.c_int, _i32]
 _lib.pfa_shop_start.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_uint64, ctypes.c_int, _i32]
 _lib.pfa_shop_start.restype = ctypes.c_int
@@ -1402,6 +1404,36 @@ class _Shop:
         N = self.n * self.m
         seq = self.pool[i * N:(i + 1) * N]
         return int(self.cost[i]), [list(map(int, seq[k * self.n:(k + 1) * self.n])) for k in range(self.m)]
+
+def colour(edges: np.ndarray, k: int, num_steps: int = 10_000_000, seed: int = 42,
+           vertices: int | None = None) -> tuple[int, np.ndarray]:
+    """
+    Graph colouring with k colours: edges is E x 2, a pair of vertex indices per edge (0-based; vertices defaults to
+    one more than the largest index); the number of edges whose ends share a colour minimised, zero being a legal
+    colouring. The kernel is TabuCol at zero temperature, one conflicting vertex recoloured per iteration; the loop is
+    the duet of Moalic and Gondran around it, two parents crossed by Galinier and Hao's partition crossover, two elites,
+    with the restart's length read from the children's descents (see the README). num_steps is the budget in kernel
+    iterations; a legal colouring returns early. Returns (conflicts, colours), colours one per vertex in 0 .. k - 1.
+    """
+    edges = np.asarray(edges)
+    if edges.ndim != 2 or edges.shape[1] != 2 or len(edges) == 0 or (edges < 0).any():
+        raise ValueError("edges must be E x 2 non-negative vertex indices")
+    V = int(edges.max()) + 1 if vertices is None else int(vertices)
+    if V <= int(edges.max()) or k < 1:
+        raise ValueError("vertices must exceed every index and k must be positive")
+    e = edges[edges[:, 0] != edges[:, 1]]
+    e = np.unique(np.sort(e, axis=1), axis=0)
+    deg = np.bincount(e.ravel(), minlength=V)
+    off = np.zeros(V + 1, dtype=np.int64)
+    off[1:] = np.cumsum(deg)
+    order = np.argsort(np.concatenate((e[:, 0], e[:, 1])), kind="stable")
+    nbr = np.concatenate((e[:, 1], e[:, 0]))[order]
+    best = np.empty(V, dtype=np.int32)
+    st = np.zeros(16)
+    c = _lib.pfa_colour_run(V, int(k), off.astype(np.int32), nbr.astype(np.int32), int(num_steps), 0.0,
+                            int(np.random.default_rng(seed).integers(1, 2**63)), best, st)
+    return int(c), best
+
 
 def _one_hot_layout(groups):
     """Variable of each slot (labels in sorted order), slots grouped by variable in input order, values per variable,
