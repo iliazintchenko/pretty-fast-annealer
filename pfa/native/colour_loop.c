@@ -95,20 +95,23 @@ long pfa_colour_head(int V, int k, const int *off, const int *nbr, long iter_tc,
 }
 
 // PFA's loop: HEAD's duet under one budget of kernel iterations, with the restart's length set from the kernel's
-// own report instead of tuned per instance. The length starts at 16 V, the value HEAD tunes for the random graphs
-// (8,000 at 500 vertices, 40,000 at 1,000), and only lengthens: each call reports the iteration at which it first
-// reached its final best, and when the median of that position over the last twenty displaced calls (children that
-// started above their parents' level) lies past 0.7 of the call, the child was still descending when the call ended
-// and the length grows by a third, at most once per ten calls, up to 1,000 V. At HEAD's tuned lengths that median
-// is 0.48-0.63 on DSJC500.5, DSJC1000.5 and le450_25c alike; the structured graphs, which HEAD tunes 27 times longer
-// per vertex, start far past it. The length never shrinks: too long a search costs generations, which nothing inside
-// a run signals, while too short a one shows in the calls themselves. Rules that also shortened were measured and
-// failed: the median return time to the parents' level is censored by the length in both directions, the return share
-// and a two-sided controller on the first best moved with the stage of the run, and doubling on the parents'
-// convergence never fired on le450_25c, whose parents never become 99% identical. The loop never stops before the
-// budget or a legal colouring: at convergence the elite swap comes first; parents and both elites all within 1%, one
-// parent is replaced by a random colouring and searched. stats: kernel iterations, generations, best conflicts,
-// seconds, elite swaps, generation of the best, kicks, final length, lengthenings, mean length over the calls.
+// own report instead of tuned per instance. The length starts at an eighth of the edges, which is HEAD's tuning on
+// the random graphs within a factor of two (8,000 on DSJC500.5, 40,000 on DSJC1000.5, 140,000 on C2000.5), and only
+// lengthens: each call reports the iteration at which it first reached its final best; when the median of that
+// position over the last hundred displaced calls (children that started above their parents' level) lies past 0.8 of
+// the call, the children were still descending when the calls ended, and the length doubles, up to 1,000 V. At the
+// tuned lengths that median is 0.5-0.6 on DSJC500.5, DSJC1000.5 and le450_25c alike, while a search thirty times too
+// short, as an eighth of le450_25c's edges is, puts it near 1; the hundred-call window and the 0.8 keep the noise of
+// the right length from ever crossing (a twenty-call window at 0.7 crossed about once in seventy-five generations and
+// the rule, one-sided, ratcheted the length to three times the tuned value). The length never shrinks: too long a
+// search costs generations, which nothing inside a run signals, while too short a one shows in the calls themselves.
+// Rules that also shortened were measured and failed: the median return time to the parents' level is censored by the
+// length in both directions, the return share and a two-sided controller on the first best moved with the stage of
+// the run, and doubling on the parents' convergence never fired on le450_25c, whose parents never become 99%
+// identical. The loop never stops before the budget or a legal colouring: at convergence the elite swap comes first;
+// parents and both elites all within 1%, one parent is replaced by a random colouring and searched. stats: kernel
+// iterations, generations, best conflicts, seconds, elite swaps, generation of the best, kicks, final length,
+// doublings, mean length over the calls.
 long pfa_colour_run(int V, int k, const int *off, const int *nbr, long budget, double seconds, uint64_t seed,
                     int *best_out, double *stats) {
     double t0 = col_now();
@@ -119,8 +122,9 @@ long pfa_colour_run(int V, int k, const int *off, const int *nbr, long budget, d
     for (int i = 0; i < 2; i++) child[i] = malloc(V * sizeof(int));
     memcpy(best_out, pop[0], V * sizeof(int)); best = fit[0];
     const long floor_L = 1000, cap_L = 1000L * V;
-    long L = 16L * V, doublings = 0;
-    double ratio[20];                                    // the last twenty displaced calls: the first best's position in the call
+    long L = off[V] / 16, doublings = 0;                  // an eighth of the edges (off[V] counts each twice)
+    enum { W = 100 };
+    double ratio[W];                                     // the last hundred displaced calls: the first best's position in the call
     int nrat = 0, irat = 0, since = 0;
 
     double iters = 0, Lsum = 0, ncalls = 0;
@@ -137,12 +141,12 @@ long pfa_colour_run(int V, int k, const int *off, const int *nbr, long budget, d
             cfit[i] = pfa_colour_tabu(V, k, off, nbr, tmp, L, col_rng(&rng), child[i], st);
             iters += st[0]; Lsum += L; ncalls++;
             if (st[6] > col_target && cfit[i] > 0) {     // a displaced child that did not finish the search: where its first best fell
-                ratio[irat] = st[7] / (double)L; irat = (irat + 1) % 20; if (nrat < 20) nrat++;
-                if (nrat == 20 && ++since >= 10) {
-                    double a[20];
-                    for (int j = 0; j < 20; j++) a[j] = ratio[j];
-                    for (int j = 1; j < 20; j++) { double x = a[j]; int q = j; while (q > 0 && a[q - 1] > x) { a[q] = a[q - 1]; q--; } a[q] = x; }
-                    if (0.5 * (a[9] + a[10]) > 0.7 && L < cap_L) { L = L * 4 / 3 > cap_L ? cap_L : L * 4 / 3; doublings++; }
+                ratio[irat] = st[7] / (double)L; irat = (irat + 1) % W; if (nrat < W) nrat++;
+                if (nrat == W && ++since >= W / 2) {
+                    double a[W];
+                    for (int j = 0; j < W; j++) a[j] = ratio[j];
+                    for (int j = 1; j < W; j++) { double x = a[j]; int q = j; while (q > 0 && a[q - 1] > x) { a[q] = a[q - 1]; q--; } a[q] = x; }
+                    if (0.5 * (a[W / 2 - 1] + a[W / 2]) > 0.8 && L < cap_L) { L = L * 2 > cap_L ? cap_L : L * 2; doublings++; nrat = 0; irat = 0; }
                     since = 0;
                 }
             }
