@@ -753,21 +753,25 @@ all.
   larger pool was not built: the two parents already sit most of the graph apart, and the reference's own evidence
   argues intensification.
 - **The restart's length.** The one number the reference tunes per instance, over two orders of magnitude between
-  the random and the structured graphs, with an optimum a few times wide a side. PFA reads it from the graph and the
-  run: the length starts at an eighth of the edges, which is the reference's tuning on the random graphs written
-  without the instance, and doubles when the median position of the call's first best over the last hundred displaced
-  calls, children that started above their parents' level, lies past four fifths of the call, the children still
-  descending when the calls end; it never shortens, because too long a search costs generations, which nothing
-  inside a run signals, while too short a one shows in the calls themselves. Rules that also shortened were measured
-  and failed: the child's time to return to its parents' level is censored by the length that bounds it, in both
-  directions; the share of children that return and a two-sided controller on the first best's position move with the
-  stage of the run and find a different length on each graph; and lengthening when the parents converge never fires on
-  the structured graphs, whose parents never become nearly identical. On the random graphs the length never moves
-  from its start; on the structured ones it doubles a few times early and then holds.
+  the random and the structured graphs, with an optimum a few times wide a side. PFA reads it from the graph: the
+  reference's tuned lengths on the random graphs, from three to seventy iterations per vertex, are an eighth of the
+  edges per vertex up to half density and flat past it, so the length is the smaller of an eighth of the edges and a
+  thirty-second of the vertex pairs, within a factor of two of the tuned value on every random graph of the
+  reference's table. Six rules that read the length from the run instead were built and measured against the tuned
+  values, and none held: the child's time to return to its parents' level is censored by the length that bounds it,
+  in both directions; the share of children that return, and a two-sided controller on where the call's first best
+  falls, move with the stage of the run and find a different length on each graph; lengthening when the parents
+  converge never fires on the structured graphs, whose parents never become nearly identical; and lengthening when the
+  first best falls late in the call, which is what a call too short looks like, is also what the sparse random graphs
+  look like at the right length, where the descent is a slow creep that fills the call whatever its length, so the
+  rule lengthened them until they failed while reaching no colouring on the structured graphs that the tuned length
+  did not also reach. The structured graphs, which the reference tunes a hundred times longer per edge, are where the
+  graph quantity is short, and the notes state them as the class's loss; neither solver colours them at the record
+  within an hour on one core here.
 
 The kernel is Hertz and de Werra's in Galinier and Hao's form, the fold is Galinier and Hao's, the loop is Moalic and
 Gondran's. What is PFA's on colourings is the cache kept only where the scan reads, the restart's length read from the
-graph and corrected from the run, and the budget as one number.
+graph, and the budget as one number.
 
 ## Usage
 
