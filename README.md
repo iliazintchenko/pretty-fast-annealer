@@ -244,10 +244,10 @@ class are the loop, a kernel run cold, restarts that keep what the best state ha
 one budget number. The kernel is whatever move the class demands, and is usually the move the class's own best
 solver already uses: the Boltzmann step over spins, Taillard's exchange update on quadratic assignment, Lin and
 Kernighan's chain on tours, the route moves of the hybrid genetic search on routes, the critical-block tabu search on
-shops, TabuCol on colourings. The reference is therefore different for every class, and it is the state of the art of
-that class: optimised simulated annealing on spin glasses, robust tabu search and the memetic algorithms on quadratic
-assignment, LKH on tours, HGS-CVRP on routes, the tabu searches and the constraint-programming solvers on shops, the
-memetic algorithm HEAD on colourings. The sections below say
+shops, TabuCol on colourings, the weighted two-stage exchange on covers. The reference is therefore different for
+every class, and it is the state of the art of that class: optimised simulated annealing on spin glasses, robust tabu
+search and the memetic algorithms on quadratic assignment, LKH on tours, HGS-CVRP on routes, the tabu searches and the
+constraint-programming solvers on shops, the memetic algorithm HEAD on colourings, NuMVC on covers. The sections below say
 what is mapped how and what is whose; the measurements live with the problem sets.
 
 ### Spin glasses: the step against Metropolis
@@ -773,6 +773,50 @@ The kernel is Hertz and de Werra's in Galinier and Hao's form, the fold is Galin
 Gondran's. What is PFA's on colourings is the cache kept only where the scan reads, the restart's length read from the
 graph, and the budget as one number.
 
+### Covers
+
+`pfa.cover()` finds a small vertex cover: a set of vertices touching every edge, the fewest the better; its complement
+is an independent set, and on the complement graph a clique, so the three problems are one. The state of the art on
+the classic benchmarks, the planted-optimum graphs of the BHOSLIB set and the DIMACS graphs, is Cai's line of weighted
+local searches, NuMVC and its successors, FastVC on the massive sparse graphs; on large real graphs Lamm, Sanders,
+Schulz, Strash and Werneck's KaMIS, exact reductions around an evolutionary search, holds the records. The objective
+is again a count of violated constraints, uncovered edges, with small-integer deltas and wide plateaus.
+
+- **The state.** The set, kept as a list with positions, and the uncovered edges likewise. Per vertex a score: for a
+  vertex outside the set the weighted count of uncovered edges it would cover, for one inside minus the weighted count
+  of edges only it covers, so a move's delta is read off and its update is one pass over the moved vertex's
+  neighbours. The search runs at a fixed set size, which makes every move an exchange: one vertex out, one in. When
+  every edge is covered the size drops by one, the vertex of least loss leaving, and the search continues; the
+  smallest set at which it reached zero is the answer, and the budget is the steps in all.
+- **The move.** The kernel (`cover.c`) is NuMVC's two-stage exchange: the vertex of greatest score leaves the set,
+  the one that just entered excepted, ties to the oldest; an uncovered edge is drawn at random and the endpoint of
+  greater score enters, an endpoint whose neighbourhood has not changed since it last left never (Cai's
+  configuration checking). Then every uncovered edge's weight rises by one, and when the mean weight reaches half the
+  vertex count all weights are scaled down. Zero temperature for the fifth class: the deltas are small integers and
+  the plateau is wide, as on shops and colourings, and the directed element is the memory. Here the memory is not a
+  tabu but the weights, which reshape the landscape as the search sits on it: the edges a walk keeps failing to cover
+  grow heavy until covering them pays, and the forgetting keeps the reshaping from freezing. The generic exchange
+  kernel of the first part of this document, a Boltzmann draw over all pairs, was measured on the same instances and
+  is out by two orders in rate and does not approach the planted optimum.
+- **What the scan reads.** The step is a scan of the set for the vertex to leave and two neighbour passes. The
+  reference scans through three arrays by indirection; the kernel keeps the set's scores and stamps in two
+  contiguous arrays by position, mirrored on every change (the weight increments touch only vertices outside the set
+  and need none), and scans those, which the compiler vectorises. Same trajectory, step for step.
+- **The loop, the restart and the fold.** The reference runs one trajectory with no restart, no population and no
+  crossover, so here the restart and the fold were PFA's claim alone, and they were measured before being built in:
+  the walk set back to the lowest state it saw, with and without its weights, and the fold of two lowest states, the
+  vertices they share kept and the rest filled greedily, each run on against the trajectory simply continued. None
+  separated from the continued trajectory on the probability of reaching a cover within a call, nor on the time to a
+  cover over many seeds. The reason is in the shape of the problem: at the optimum size the walk sits with one or two
+  edges uncovered and the weights keep moving it, and two good states a few million steps apart already share nearly
+  everything, so a fold has almost nothing to merge and a restart from the lowest state is a place the walk revisits
+  by itself. The loop on covers is therefore the kernel under the budget, with the size dropping at every cover found.
+
+The kernel is Cai, Su, Luo and Sattar's, and so is the start. What is PFA's on covers is the layout the scan reads,
+the budget as one number, and the measurement that the restart and the fold add nothing on this class, which is a
+statement about the conjecture: where the state of the art is a single weighted trajectory, the framework's loop is
+that trajectory.
+
 ## Usage
 
 `make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the six kernels: `spin.c`,
@@ -832,8 +876,12 @@ colour in 0 … k − 1 per vertex, for a graph given as an m × 2 array of edge
 when the last vertices are isolated). `num_steps` is the budget, the number of kernel iterations in all; the search
 returns as soon as the count is zero (see Colourings).
 
+`pfa.cover(edges, num_steps, seed)` returns the size of the smallest vertex cover found and the cover, one 0/1 per
+vertex, for a graph given as above. `num_steps` is the budget, the number of kernel steps; `target` returns as soon as
+a cover of that size is found (see Covers).
+
 `examples/spins.py` solves a small problem given over 0/1 variables, `examples/colouring.py` finds the fewest colours
 for a random graph, `examples/qap.py` solves a quadratic assignment and `examples/partition.py` cuts a graph
 in two equal parts, both by exchanges, `examples/tour.py` finds a tour through random points, `examples/route.py`
-routes vehicles from a depot to random customers, `examples/shop.py` schedules a random job shop, and
-`examples/throughput.py` measures steps per second.
+routes vehicles from a depot to random customers, `examples/shop.py` schedules a random job shop, `examples/cover.py`
+covers the edges of a random graph with few vertices, and `examples/throughput.py` measures steps per second.

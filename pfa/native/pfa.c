@@ -24,6 +24,9 @@
 //                          cache of best colours, pfa_colour_tabu(); the partition crossover, pfa_colour_gpx()
 //   colour_loop.c          the duet of two parents and two elites under one budget of kernel iterations, the
 //                          restart's length read from the children's returns: pfa_colour_run()
+//   cover.c                minimum vertex cover: the two-stage exchange with edge weights at zero temperature under
+//                          one budget of steps, the level dropping at every cover found, pfa_cover_search(); the
+//                          greedy start, pfa_cover_greedy()
 //   eliminate.c           categorical variables: pfa_eliminate(), before the anneal
 //   fold.c                 pfa_fold_spin(), pfa_fold_sparse_spin(), pfa_fold_categorical(), pfa_fold_swap(): one
 //                          state takes from another every part that it has lower, between the repetitions
@@ -162,5 +165,6 @@ const char *pfa_simd_path(void) { return SIMD_PATH; }
 #include "shop_loop.c"
 #include "colour.c"
 #include "colour_loop.c"
+#include "cover.c"
 #include "eliminate.c"
 #include "fold.c"

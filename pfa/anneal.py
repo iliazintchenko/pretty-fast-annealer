@@ -164,6 +164,11 @@ _lib.pfa_shop_loop.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_
 _lib.pfa_shop_loop.restype = ctypes.c_int
 _lib.pfa_colour_run.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_long, ctypes.c_double, ctypes.c_uint64, _i32, _f64]
 _lib.pfa_colour_run.restype = ctypes.c_long
+_lib.pfa_cover_greedy.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, _i32]
+# V, E, the edges' ends, the set in/out, the weights in/out, target, steps, seconds, seed, the best cover out, the lowest state out, stats
+_lib.pfa_cover_search.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, _i32, _i32, ctypes.c_int, ctypes.c_long, ctypes.c_double,
+                                  ctypes.c_uint64, _i32, _i32, _f64]
+_lib.pfa_cover_search.restype = ctypes.c_long
 _lib.pfa_shop_gt.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_uint64, ctypes.c_int, _i32]
 _lib.pfa_shop_start.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_uint64, ctypes.c_int, _i32]
 _lib.pfa_shop_start.restype = ctypes.c_int
@@ -1433,6 +1438,33 @@ def colour(edges: np.ndarray, k: int, num_steps: int = 10_000_000, seed: int = 4
     c = _lib.pfa_colour_run(V, int(k), off.astype(np.int32), nbr.astype(np.int32), int(num_steps), 0.0,
                             int(np.random.default_rng(seed).integers(1, 2**63)), best, st)
     return int(c), best
+
+
+def cover(edges: np.ndarray, num_steps: int = 10_000_000, seed: int = 42, vertices: int | None = None,
+          target: int = 0) -> tuple[int, np.ndarray]:
+    """
+    Minimum vertex cover: edges is E x 2, a pair of vertex indices per edge (0-based; vertices defaults to one more
+    than the largest index); the smallest set of vertices touching every edge is sought. The search runs at a fixed
+    set size with the uncovered edges minimised, drops one vertex whenever every edge is covered, and continues; the
+    kernel is the two-stage exchange with edge weights at zero temperature (see the README). num_steps is the budget
+    in kernel steps; a cover of size target or smaller returns early. Returns (size, cover), cover one 0/1 per vertex.
+    """
+    edges = np.asarray(edges)
+    if edges.ndim != 2 or edges.shape[1] != 2 or len(edges) == 0 or (edges < 0).any():
+        raise ValueError("edges must be E x 2 non-negative vertex indices")
+    V = int(edges.max()) + 1 if vertices is None else int(vertices)
+    if V <= int(edges.max()):
+        raise ValueError("vertices must exceed every index")
+    e = edges[edges[:, 0] != edges[:, 1]]
+    e = np.unique(np.sort(e, axis=1), axis=0)
+    eu, ev = np.ascontiguousarray(e[:, 0], dtype=np.int32), np.ascontiguousarray(e[:, 1], dtype=np.int32)
+    inc = np.empty(V, dtype=np.int32)
+    _lib.pfa_cover_greedy(V, len(e), eu, ev, inc)
+    w = np.ones(len(e), dtype=np.int32)
+    best, low, st = np.empty(V, dtype=np.int32), np.empty(V, dtype=np.int32), np.zeros(8)
+    size = _lib.pfa_cover_search(V, len(e), eu, ev, inc, w, int(target), int(num_steps), 0.0,
+                                 int(np.random.default_rng(seed).integers(1, 2**63)), best, low, st)
+    return int(size), best
 
 
 def _one_hot_layout(groups):
