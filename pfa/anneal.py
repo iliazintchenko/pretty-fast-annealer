@@ -175,6 +175,8 @@ _u8 = np.ctypeslib.ndpointer(dtype=np.uint8, ndim=1, flags="C_CONTIGUOUS")
 _lib.pfa_maxsat_run.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, _i32, _i32, _i64, ctypes.c_void_p, ctypes.c_long, ctypes.c_long,
                                 ctypes.c_double, ctypes.c_int64, ctypes.c_uint64, _u8, ctypes.c_void_p, ctypes.c_long, _f64]
 _lib.pfa_maxsat_run.restype = ctypes.c_int64
+_lib.pfa_maxsat_run_from.argtypes = _lib.pfa_maxsat_run.argtypes + [_u8]   # ... and the assignment the first try starts from
+_lib.pfa_maxsat_run_from.restype = ctypes.c_int64
 _lib.pfa_shop_gt.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_uint64, ctypes.c_int, _i32]
 _lib.pfa_shop_start.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_uint64, ctypes.c_int, _i32]
 _lib.pfa_shop_start.restype = ctypes.c_int

@@ -853,12 +853,19 @@ search, not the SAT solver in front of it.
   assignment with decimation, unit propagation with random choices under a best-of-sample rule on the variables
   assigned longest ago in the previous decimation, or from a random assignment after three tries without
   improvement, and when the current assignment violates a hard clause the hard clauses are first solved alone by the
-  same kernel. The budget is flips in all, and a target cost returns early. The fold of two assignments was not
-  built: the measurement that decides whether to build it, two good assignments merged against the trajectory
-  continued, is the next item on this class, after the kernel's parity is settled.
+  same kernel. The budget is flips in all, and a target cost returns early. The fold was measured before being
+  built, as on covers: two trajectories' best assignments after a prefix, merged with the variables they agree on
+  kept and the rest drawn at random, and continued by the kernel through its own restart path, against one
+  trajectory simply continued, at equal flips on one core, on six evaluation instances and twenty pairs each. Where a
+  child was built it reached the target earlier than the continued trajectory as often as later (30 against 34), and
+  needed more flips from the merge than the trajectory did from the same point. Here the two bests are not near
+  copies, they differ on a tenth to a third of the variables, each one short of the target; the merge is still no
+  better a start than the walk's own next step. The fold is not built, and the loop on Max-SAT is the kernel under
+  the budget.
 
 What is PFA's on Max-SAT is the clause-of-position array and the flat occurrence ranges, the budget as one number,
-and the certificate: the kernel built with the C library's generator reproduces the reference's flip sequence exactly
+the measurement that the fold adds nothing on this class, and the certificate: the kernel built with the C library's
+generator reproduces the reference's flip sequence exactly
 over two hundred thousand flips on each of six evaluation instances. On the 2024 anytime track's unweighted
 instances where the pure local search is listed at the best known within 60 seconds, the kernel and the reference
 at equal wall on one core reach that cost on the same instances with the same frequency over seeds, the kernel

@@ -51,6 +51,7 @@ typedef struct {
     int32_t *trace; long ntrace, ktrace;
     uint64_t rng;
     double t0, seconds;
+    int init_set;                  // a given start assignment stands in for the first random one
 } MS;
 
 static double ms_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + 1e-9 * t.tv_nsec; }
@@ -101,6 +102,7 @@ static int ms_update_result(MS *S, int infeasible) {
 
 static void ms_init_vars(MS *S, int force_random) {
     if (!force_random && S->status != 3) memcpy(S->val, S->best, S->n);
+    else if (S->init_set) S->init_set = 0;
     else for (uint32_t v = 0; v < S->n; v++) S->val[v] = (uint8_t)ms_coin(S, 50000000u);
 }
 
@@ -340,10 +342,12 @@ static void ms_solve_hard(MS *S, uint64_t max_flips, int force_random, int *reus
 // repeated variable, and every soft weight is positive. The search runs max_flips flips per try until budget flips
 // in all, seconds, or a feasible assignment of cost at most target. Writes the best assignment to best_out (0/1 per
 // variable) and the first ntrace flipped variables to trace, returns the best cost (-1 if no feasible assignment).
-// stats: flips, tries, the flip of the best, seconds, status, seconds at the best.
-int64_t pfa_maxsat_run(int n, int m, int nh, const int32_t *off, const int32_t *lits, const int64_t *w, const int32_t *occ_order,
-                       long max_flips, long budget, double seconds, int64_t target, uint64_t seed,
-                       uint8_t *best_out, int32_t *trace, long ntrace, double *stats) {
+// stats: flips, tries, the flip of the best, seconds, status, seconds at the best. init, if given, is the assignment
+// the first try starts from in place of the random one (kept if it satisfies the hard clauses, else the hard clauses
+// are solved alone from it); it then goes through the start's decimation like any restart from the best.
+static int64_t ms_run(int n, int m, int nh, const int32_t *off, const int32_t *lits, const int64_t *w, const int32_t *occ_order,
+                      long max_flips, long budget, double seconds, int64_t target, uint64_t seed,
+                      uint8_t *best_out, int32_t *trace, long ntrace, double *stats, const uint8_t *init) {
     MS S; memset(&S, 0, sizeof S);
     S.n = (uint32_t)n; S.m = S.mall = (uint32_t)m; S.nh = (uint32_t)nh; S.off = off; S.lits = lits; S.w = w;
     S.budget = (uint64_t)budget; S.seconds = seconds; S.t0 = ms_now(); S.trace = trace; S.ntrace = ntrace;
@@ -364,6 +368,7 @@ int64_t pfa_maxsat_run(int n, int m, int nh, const int32_t *off, const int32_t *
     }
     free(fill);
     S.val = calloc(n, 1); S.best = best_out;
+    if (init) { memcpy(S.val, init, n); S.init_set = 1; }
     S.cw = malloc(m * sizeof(uint64_t)); S.tuned = malloc(m * sizeof(uint64_t));
     S.nsat = malloc(m * sizeof(uint32_t)); S.satvar = malloc(m * sizeof(uint32_t));
     S.score = malloc(n * sizeof(int64_t));
@@ -397,6 +402,7 @@ int64_t pfa_maxsat_run(int n, int m, int nh, const int32_t *off, const int32_t *
             ms_decimation(&S, reuse); reuse = 1;
             ms_init_weights(&S, avg);
             ms_init_algo(&S);
+            S.init_set = 0;
         }
         skip = 0;
         for (uint64_t f = 0; f < (uint64_t)max_flips && !ms_done(&S) && !ms_stop(&S); f++) {
@@ -414,4 +420,17 @@ int64_t pfa_maxsat_run(int n, int m, int nh, const int32_t *off, const int32_t *
     free(S.dec); free(S.decpos); free(S.fh); free(S.fhpos); free(S.fs); free(S.fspos); free(S.hw); free(S.hwpos); free(S.flips);
     free(S.un); free(S.unpos); free(S.hu); free(S.huposc); free(S.su); free(S.suposc); free(S.prevdec); free(S.crem); free(S.cnl);
     return S.status == 3 ? -1 : (int64_t)S.best_cost;
+}
+
+int64_t pfa_maxsat_run(int n, int m, int nh, const int32_t *off, const int32_t *lits, const int64_t *w, const int32_t *occ_order,
+                       long max_flips, long budget, double seconds, int64_t target, uint64_t seed,
+                       uint8_t *best_out, int32_t *trace, long ntrace, double *stats) {
+    return ms_run(n, m, nh, off, lits, w, occ_order, max_flips, budget, seconds, target, seed, best_out, trace, ntrace, stats, NULL);
+}
+
+// The same from a given assignment (init, 0/1 per variable).
+int64_t pfa_maxsat_run_from(int n, int m, int nh, const int32_t *off, const int32_t *lits, const int64_t *w, const int32_t *occ_order,
+                            long max_flips, long budget, double seconds, int64_t target, uint64_t seed,
+                            uint8_t *best_out, int32_t *trace, long ntrace, double *stats, const uint8_t *init) {
+    return ms_run(n, m, nh, off, lits, w, occ_order, max_flips, budget, seconds, target, seed, best_out, trace, ntrace, stats, init);
 }
