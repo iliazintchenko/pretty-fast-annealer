@@ -169,6 +169,12 @@ _lib.pfa_cover_greedy.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, _i32]
 _lib.pfa_cover_search.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, _i32, _i32, ctypes.c_int, ctypes.c_long, ctypes.c_double,
                                   ctypes.c_uint64, _i32, _i32, _f64]
 _lib.pfa_cover_search.restype = ctypes.c_long
+_u8 = np.ctypeslib.ndpointer(dtype=np.uint8, ndim=1, flags="C_CONTIGUOUS")
+# n, m, hard clauses, the clauses as literal ranges (off, lits), weights (0 hard), the occurrence order or None,
+# flips per try, flips in all, seconds, target, seed, the best assignment out, the trace out and its length, stats
+_lib.pfa_maxsat_run.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, _i32, _i32, _i64, ctypes.c_void_p, ctypes.c_long, ctypes.c_long,
+                                ctypes.c_double, ctypes.c_int64, ctypes.c_uint64, _u8, ctypes.c_void_p, ctypes.c_long, _f64]
+_lib.pfa_maxsat_run.restype = ctypes.c_int64
 _lib.pfa_shop_gt.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_uint64, ctypes.c_int, _i32]
 _lib.pfa_shop_start.argtypes = [ctypes.c_int, ctypes.c_int, _i32, _i32, ctypes.c_uint64, ctypes.c_int, _i32]
 _lib.pfa_shop_start.restype = ctypes.c_int
@@ -1465,6 +1471,57 @@ def cover(edges: np.ndarray, num_steps: int = 10_000_000, seed: int = 42, vertic
     size = _lib.pfa_cover_search(V, len(e), eu, ev, inc, w, int(target), int(num_steps), 0.0,
                                  int(np.random.default_rng(seed).integers(1, 2**63)), best, low, st)
     return int(size), best
+
+
+def _clauses(clauses, weights):
+    """Clauses in DIMACS form (nonzero ints, sign the polarity, 1-based variables) to literal ranges with repeated
+    variables merged and tautologies dropped; returns (off, lits, weights kept, variables)."""
+    off, lits, kept, n = [0], [], [], 0
+    for cl, w in zip(clauses, weights):
+        seen = {}
+        for lit in cl:
+            lit = int(lit)
+            if lit == 0:
+                raise ValueError("a literal is 0")
+            v = abs(lit)
+            if seen.get(v, lit) != lit:
+                break   # x and not x: always true
+            seen[v] = lit
+        else:
+            if not seen:
+                raise ValueError("an empty clause")
+            lits.extend(2 * (abs(lit) - 1) + (lit < 0) for lit in seen.values())
+            off.append(len(lits))
+            kept.append(w)
+            n = max(n, max(seen))
+    return np.array(off, dtype=np.int32), np.array(lits, dtype=np.int32), np.array(kept, dtype=np.int64), n
+
+
+def maxsat(hard, soft, weights=None, num_steps: int = 100_000_000, seed: int = 42, variables: int | None = None,
+           target: int = 0) -> tuple[int, np.ndarray]:
+    """
+    Weighted partial Max-SAT: hard and soft are lists of clauses, a clause a sequence of nonzero ints in the DIMACS
+    convention (the sign the polarity, variables numbered from 1; variables defaults to the largest named); weights
+    one positive int per soft clause, all ones if None. An assignment satisfying every hard clause with the least
+    total weight of falsified soft clauses is sought; the kernel is the weighted local search at zero temperature
+    with the clause weights as the memory (see the README). num_steps is the budget in flips; a feasible assignment of
+    cost at most target returns early. Returns (cost, assignment), assignment one 0/1 per variable; cost is -1 when
+    no assignment satisfying the hard clauses was found.
+    """
+    hard, soft = list(hard), list(soft)
+    weights = [1] * len(soft) if weights is None else [int(w) for w in weights]
+    if len(weights) != len(soft) or any(w <= 0 for w in weights):
+        raise ValueError("weights must give one positive int per soft clause")
+    off, lits, w, n = _clauses(hard + soft, [0] * len(hard) + weights)
+    if variables is not None:
+        if int(variables) < n:
+            raise ValueError("variables must cover every index")
+        n = int(variables)
+    nh = int(np.count_nonzero(w == 0))
+    best, st = np.zeros(max(n, 1), dtype=np.uint8), np.zeros(6)
+    cost = _lib.pfa_maxsat_run(n, len(w), nh, off, lits, w, None, 10_000_000, int(num_steps), 0.0, int(target),
+                               int(np.random.default_rng(seed).integers(1, 2**63)), best, None, 0, st)
+    return int(cost), best
 
 
 def _one_hot_layout(groups):

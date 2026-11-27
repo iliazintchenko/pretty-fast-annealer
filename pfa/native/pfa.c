@@ -27,6 +27,8 @@
 //   cover.c                minimum vertex cover: the two-stage exchange with edge weights at zero temperature under
 //                          one budget of steps, the level dropping at every cover found, pfa_cover_search(); the
 //                          greedy start, pfa_cover_greedy()
+//   maxsat.c               (weighted partial) Max-SAT: noSAT-MaxSATv3's local search at zero temperature with the
+//                          clause weights as the memory, under one budget of flips, pfa_maxsat_run()
 //   eliminate.c           categorical variables: pfa_eliminate(), before the anneal
 //   fold.c                 pfa_fold_spin(), pfa_fold_sparse_spin(), pfa_fold_categorical(), pfa_fold_swap(): one
 //                          state takes from another every part that it has lower, between the repetitions
@@ -166,5 +168,6 @@ const char *pfa_simd_path(void) { return SIMD_PATH; }
 #include "colour.c"
 #include "colour_loop.c"
 #include "cover.c"
+#include "maxsat.c"
 #include "eliminate.c"
 #include "fold.c"

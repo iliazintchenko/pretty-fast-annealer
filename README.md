@@ -244,10 +244,12 @@ class are the loop, a kernel run cold, restarts that keep what the best state ha
 one budget number. The kernel is whatever move the class demands, and is usually the move the class's own best
 solver already uses: the Boltzmann step over spins, Taillard's exchange update on quadratic assignment, Lin and
 Kernighan's chain on tours, the route moves of the hybrid genetic search on routes, the critical-block tabu search on
-shops, TabuCol on colourings, the weighted two-stage exchange on covers. The reference is therefore different for
+shops, TabuCol on colourings, the weighted two-stage exchange on covers, the clause-weighting flip on Max-SAT. The
+reference is therefore different for
 every class, and it is the state of the art of that class: optimised simulated annealing on spin glasses, robust tabu
 search and the memetic algorithms on quadratic assignment, LKH on tours, HGS-CVRP on routes, the tabu searches and the
-constraint-programming solvers on shops, the memetic algorithm HEAD on colourings, NuMVC on covers. The sections below say
+constraint-programming solvers on shops, the memetic algorithm HEAD on colourings, NuMVC on covers, the NuWLS local
+search without its SAT solver on Max-SAT. The sections below say
 what is mapped how and what is whose; the measurements live with the problem sets.
 
 ### Spin glasses: the step against Metropolis
@@ -817,13 +819,61 @@ the budget as one number, and the measurement that the restart and the fold add 
 statement about the conjecture: where the state of the art is a single weighted trajectory, the framework's loop is
 that trajectory.
 
+### Max-SAT
+
+`pfa.maxsat()` takes hard clauses, which must all hold, and soft clauses with weights, and seeks the assignment that
+satisfies the hard clauses with the least weight of soft clauses falsified: weighted partial Max-SAT, the form in
+which scheduling, planning, explanation and verification problems arrive at the MaxSAT Evaluation. The state of the
+art there is a pair: complete solvers (RC2, the core-boosted Loandra of Berg, Demirović and Stuckey) on the
+instances they finish, and on the rest local searches paired with a SAT solver that supplies the first feasible
+assignment, SPB-MaxSAT-c-Band and Chu, Cai and Luo's NuWLS-c at the top of the 2024 anytime track. The local search
+inside those is the line SATLike (Lei and Cai) to NuWLS: dynamic clause weights and a flip at zero temperature. The
+pure local search in the same track, with no SAT solver at all, is Lübke's noSAT-MaxSAT, NuWLS-c-2023's search
+reimplemented standalone, and that is the kernel and the reference here, since what the conjecture tests is the
+search, not the SAT solver in front of it.
+
+- **The state.** Per clause the count of its true literals and, when that count is one, the variable that holds it;
+  per variable its score, the weighted change in falsified clauses if it flips, positive when flipping helps; the
+  variables of positive score as a list with positions; the falsified hard and soft clauses as two such lists. A
+  flip's update is one pass over the variable's clauses, each literal's clause read from one array by position
+  (the reference keeps a pointer per literal), and the variable's occurrences are a flat range, so the kernel runs at
+  1.3 to 1.9 times the reference's flips per second on the same trajectory.
+- **The move.** The kernel (`maxsat.c`) is noSAT-MaxSATv3 as its code runs it, which is NuWLS-c-2023 without the SAT
+  solver, Chu, Cai and Luo's weighting with the frequency-fitness pick Lübke added. At zero temperature the variable
+  of greatest score flips, drawn as the best of fifty samples from the positive-score list when that list is longer
+  than fifty, ties to the first drawn. At a local optimum, no variable with positive score, the memory moves: every
+  falsified hard clause's weight rises by one, and when every hard clause holds every soft clause's weight rises by
+  its increment (one unweighted, its weight over the mean soft weight when weighted, in fixed point); then a falsified
+  clause is drawn at random, hard before soft, and its least-flipped variable flips. Instances with no hard clauses
+  run the non-partial regime, a smoothing step with small probability and bounded soft weights. The sixth class at
+  zero temperature with the weights as the memory, as on covers: the clauses a walk keeps failing to satisfy grow
+  heavy until satisfying them pays.
+- **The loop, the restart and the fold.** The reference's restart is part of the transcribed kernel: a try is ten
+  million flips; a try that improved the best continues in place; a try that did not restarts from the best
+  assignment with decimation, unit propagation with random choices under a best-of-sample rule on the variables
+  assigned longest ago in the previous decimation, or from a random assignment after three tries without
+  improvement, and when the current assignment violates a hard clause the hard clauses are first solved alone by the
+  same kernel. The budget is flips in all, and a target cost returns early. The fold of two assignments was not
+  built: the measurement that decides whether to build it, two good assignments merged against the trajectory
+  continued, is the next item on this class, after the kernel's parity is settled.
+
+What is PFA's on Max-SAT is the clause-of-position array and the flat occurrence ranges, the budget as one number,
+and the certificate: the kernel built with the C library's generator reproduces the reference's flip sequence exactly
+over two hundred thousand flips on each of six evaluation instances. On the 2024 anytime track's unweighted
+instances where the pure local search is listed at the best known within 60 seconds, the kernel and the reference
+at equal wall on one core reach that cost on the same instances with the same frequency over seeds, the kernel
+earlier on most where the time is measurable; on thirteen of forty-five the shipped reference does not reproduce
+the evaluation's own row (no feasible assignment on nine of them in sixty seconds, and in three hours on one), and
+neither does the kernel, so those decide nothing.
+
 ## Usage
 
 `make` (GCC or Clang) compiles `pfa/native/pfa.c` for the current machine. It includes the six kernels: `spin.c`,
 `categorical.c` and `swap.c` for couplings as an array, and `sparse_spin.c`, `sparse_categorical.c` and
 `sparse_swap.c`, which draw from the tree of sums of `sums.c`; `eliminate.c` and `fold.c`; and for tours `tour.c`,
 `tour_chain.c`, `alpha.c`, `tour_fold.c` and `tour_ipt.c`; for routes `route.c` and `route_fold.c`; for shops
-`shop.c` and `shop_loop.c`; and for colourings `colour.c` and `colour_loop.c`. The three
+`shop.c` and `shop_loop.c`; for colourings `colour.c` and `colour_loop.c`; for covers `cover.c`; and for Max-SAT
+`maxsat.c`. The three
 array kernels use the one SIMD path that matches the machine; the rest is the same code on every path:
 
 | path | files | used on |
@@ -880,8 +930,16 @@ returns as soon as the count is zero (see Colourings).
 vertex, for a graph given as above. `num_steps` is the budget, the number of kernel steps; `target` returns as soon as
 a cover of that size is found (see Covers).
 
+`pfa.maxsat(hard, soft, weights, num_steps, seed)` returns the least weight of falsified soft clauses found and the
+assignment, one 0/1 per variable, for clauses given in the DIMACS convention (nonzero ints, the sign the polarity,
+variables numbered from 1; `variables` sets their number when the last are unnamed), `weights` one positive int per
+soft clause, all ones when omitted. `num_steps` is the budget, the number of flips; `target` returns as soon as a
+feasible assignment of at most that cost is found; the cost is −1 when no assignment satisfied every hard clause
+(see Max-SAT).
+
 `examples/spins.py` solves a small problem given over 0/1 variables, `examples/colouring.py` finds the fewest colours
 for a random graph, `examples/qap.py` solves a quadratic assignment and `examples/partition.py` cuts a graph
 in two equal parts, both by exchanges, `examples/tour.py` finds a tour through random points, `examples/route.py`
 routes vehicles from a depot to random customers, `examples/shop.py` schedules a random job shop, `examples/cover.py`
-covers the edges of a random graph with few vertices, and `examples/throughput.py` measures steps per second.
+covers the edges of a random graph with few vertices, `examples/maxsat.py` satisfies random hard clauses while
+falsifying few soft ones, and `examples/throughput.py` measures steps per second.
