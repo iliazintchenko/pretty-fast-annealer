@@ -397,9 +397,10 @@ static int64_t ms_run(int n, int m, int nh, const int32_t *off, const int32_t *l
     while (!ms_done(&S) && !ms_stop(&S)) {
         if (!skip) {
             int force = wo >= S.max_tries_wo;
+            int given = S.init_set && ms_feasible(&S);   // a given start that satisfies the hard clauses is the state: recorded as it is, not decimated first
             if (S.partial) { if (!ms_feasible(&S)) ms_solve_hard(&S, (uint64_t)max_flips, force, &reuse); }   // p_initVars: the current assignment stands when feasible
             else ms_init_vars(&S, force);
-            ms_decimation(&S, reuse); reuse = 1;
+            if (!given) { ms_decimation(&S, reuse); reuse = 1; }
             ms_init_weights(&S, avg);
             ms_init_algo(&S);
             S.init_set = 0;
